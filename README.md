@@ -1,6 +1,6 @@
 # Teamscord
 
-Teamscord 0.2 é um chat de grupos privados com um node local por instalação. Mensagens, eventos administrativos e épocas de chave são sincronizados entre peers; áudio e compartilhamento de tela usam uma malha WebRTC P2P opcional.
+Teamscord 0.2.1 é um chat de grupos privados com um node local por instalação. Mensagens, eventos administrativos e épocas de chave são sincronizados entre peers; áudio e compartilhamento de tela usam uma malha WebRTC P2P opcional.
 
 ## Stack
 
