@@ -44,3 +44,14 @@ O endereço usado no aplicativo inclui o host, a porta pública do proxy e o `Pe
 ```
 
 O TCP Proxy do Railway é o caminho suportado para este relay; QUIC continua disponível quando o serviço for hospedado em uma VPS com UDP liberado. O relay não persiste mensagens, membros ou chamadas, e o volume `/app/data` só preserva a identidade Ed25519 para que o `PeerId` não mude após reinício. Não coloque tokens, senhas ou certificados no repositório.
+
+## Teste remoto do circuito
+
+Depois que o serviço estiver online, execute o teste de dois clientes contra o relay público. Use um endereço IPv4 resolvido para o TCP Proxy e mantenha o `PeerId` do relay no multiaddr:
+
+```powershell
+$env:TEAMSCORD_TEST_RELAY_ADDRESS = "/ip4/RELAY_IP/tcp/PORTA_PUBLICA/p2p/PEER_ID_DO_RELAY"
+cargo test --manifest-path infra/relay/Cargo.toml -- --ignored two_clients_exchange_connection_through_remote_relay
+```
+
+Esse teste valida handshake Noise, reserva dos dois circuitos e conexão entre os clientes através do TCP Proxy; ele não transporta mensagens de produção nem grava dados no relay.

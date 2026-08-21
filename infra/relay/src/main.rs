@@ -174,11 +174,7 @@ mod tests {
                 )) if peer_id == relay_peer_id => {
                     reservation_accepted = true;
                 }
-                event => {
-                    if env::var_os("TEAMSCORD_TEST_VERBOSE").is_some() {
-                        eprintln!("relay test event: {event:?}");
-                    }
-                }
+                _ => {}
             }
             if address_reported && reservation_accepted {
                 return;
@@ -195,6 +191,40 @@ mod tests {
             {
                 if connected_peer == peer_id {
                     return;
+                }
+            }
+        }
+    }
+
+    async fn wait_for_remote_reservation(
+        client: &mut Swarm<ClientBehaviour>,
+        expected_peer_id: libp2p::PeerId,
+        relay_peer_id: libp2p::PeerId,
+    ) -> Multiaddr {
+        let mut announced_address = None;
+        let mut reservation_accepted = false;
+        loop {
+            match client.select_next_some().await {
+                SwarmEvent::NewListenAddr { address, .. }
+                    if address.iter().any(|protocol| {
+                        matches!(protocol, Protocol::P2p(peer_id) if peer_id == expected_peer_id)
+                    }) =>
+                {
+                    announced_address = Some(address);
+                }
+                SwarmEvent::Behaviour(ClientBehaviourEvent::Relay(
+                    relay::client::Event::ReservationReqAccepted {
+                        relay_peer_id: peer_id,
+                        ..
+                    },
+                )) if peer_id == relay_peer_id => {
+                    reservation_accepted = true;
+                }
+                _ => {}
+            }
+            if reservation_accepted {
+                if let Some(address) = announced_address.take() {
+                    return address;
                 }
             }
         }
@@ -289,20 +319,18 @@ mod tests {
             .listen_on(second_relay_address.clone())
             .expect("second remote reservation");
 
-        let expected_first_address = first_relay_address.with(Protocol::P2p(first_peer_id));
-        let expected_second_address = second_relay_address.with(Protocol::P2p(second_peer_id));
-        tokio::time::timeout(
+        let (_first_announced_address, second_announced_address) = tokio::time::timeout(
             Duration::from_secs(45),
             futures::future::join(
-                wait_for_reservation(&mut first, &expected_first_address, relay_peer_id),
-                wait_for_reservation(&mut second, &expected_second_address, relay_peer_id),
+                wait_for_remote_reservation(&mut first, first_peer_id, relay_peer_id),
+                wait_for_remote_reservation(&mut second, second_peer_id, relay_peer_id),
             ),
         )
         .await
         .expect("remote relay reservation timeout");
 
         first
-            .dial(expected_second_address)
+            .dial(second_announced_address)
             .expect("dial second client through remote relay");
         tokio::time::timeout(
             Duration::from_secs(45),

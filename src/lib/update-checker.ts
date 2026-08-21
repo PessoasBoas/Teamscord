@@ -1,4 +1,4 @@
-export const CURRENT_VERSION = "0.3.0";
+export const CURRENT_VERSION = "0.3.1";
 export const RELEASES_ENDPOINT = "https://api.github.com/repos/PessoasBoas/Teamscord/releases/latest";
 export const DISMISSED_UPDATE_STORAGE = "teamscord.dismissed-update";
 
