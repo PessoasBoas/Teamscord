@@ -304,6 +304,7 @@ async fn start_node(app: AppHandle, state: State<'_, NodeState>) -> Result<NodeS
             emit_error(&app, error);
             if let Ok(mut current) = runtime_state.snapshot.lock() {
                 current.is_running = false;
+                emit_snapshot(&app, &current);
             }
         }
     });
@@ -2753,7 +2754,10 @@ async fn run_node(
                     let envelope = *envelope;
                     let topic = IdentTopic::new(topic_for(&envelope.channel_id));
                     match serde_json::to_vec(&envelope) {
-                        Ok(payload) => if let Err(error) = swarm.behaviour_mut().gossipsub.publish(topic, payload) { emit_error(&app, format!("não foi possível publicar: {error}")); },
+                        Ok(payload) => if let Err(error) = swarm.behaviour_mut().gossipsub.publish(topic, payload) {
+                            if is_waiting_publish_error(&error) { emit_sync_waiting(&app); }
+                            else { emit_error(&app, format!("não foi possível publicar: {error}")); }
+                        },
                         Err(error) => emit_error(&app, format!("mensagem inválida: {error}")),
                     }
                 }
@@ -2761,7 +2765,10 @@ async fn run_node(
                     let event = *event;
                     let topic = IdentTopic::new(topic_for_control(&event.group_id));
                     match serde_json::to_vec(&event) {
-                        Ok(payload) => if let Err(error) = swarm.behaviour_mut().gossipsub.publish(topic, payload) { emit_error(&app, format!("não foi possível publicar evento administrativo: {error}")); },
+                        Ok(payload) => if let Err(error) = swarm.behaviour_mut().gossipsub.publish(topic, payload) {
+                            if is_waiting_publish_error(&error) { emit_sync_waiting(&app); }
+                            else { emit_error(&app, format!("não foi possível publicar evento administrativo: {error}")); }
+                        },
                         Err(error) => emit_error(&app, format!("evento administrativo inválido: {error}")),
                     }
                 }
@@ -4444,6 +4451,27 @@ fn emit_snapshot(app: &AppHandle, snapshot: &NodeSnapshot) {
             snapshot: Some(snapshot.clone()),
             error: None,
             data: None,
+        },
+    );
+}
+
+fn is_waiting_publish_error(error: &gossipsub::PublishError) -> bool {
+    matches!(
+        error,
+        gossipsub::PublishError::NoPeersSubscribedToTopic
+            | gossipsub::PublishError::AllQueuesFull(_)
+    )
+}
+
+fn emit_sync_waiting(app: &AppHandle) {
+    let _ = app.emit(
+        EVENT_NAME,
+        NodeEvent {
+            kind: "sync-state".into(),
+            message: None,
+            snapshot: None,
+            error: None,
+            data: Some(serde_json::json!({ "state": "waiting" })),
         },
     );
 }

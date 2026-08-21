@@ -203,7 +203,7 @@ function App() {
           }
           if (event.kind === "sync-state" && event.data) {
             const state = event.data as { state?: string };
-            setSyncLabel(state.state === "synced" ? "sincronizado" : state.state === "error" ? "erro de sincronização" : "sincronizando");
+            setSyncLabel(state.state === "synced" ? "sincronizado" : state.state === "error" ? "erro de sincronização" : state.state === "waiting" ? "aguardando peer" : "sincronizando");
             setNodeStatus(state.state === "syncing" ? "syncing" : "online");
           }
           if (event.kind === "peer-updated" && event.data) {
@@ -238,7 +238,7 @@ function App() {
             if (event.kind !== "key-epoch-changed") setNotifications((items) => [{ id: crypto.randomUUID(), kind: "member" as const, title: "Grupo atualizado", body: "As alterações foram sincronizadas entre os nodes.", created_at: Date.now(), read: false, group_id: activeSelection.current.groupId }, ...items].slice(0, 100));
           }
           if (event.kind === "media-error") setError(event.error ?? "falha de mídia");
-          if (event.error) { setError(event.error); if (event.kind === "error") setNodeStatus("offline"); }
+          if (event.error) setError(event.error);
         });
         const currentSnapshot = await nodeApi.getNodeSnapshot();
         localPeerIdRef.current = currentSnapshot.peer_id;

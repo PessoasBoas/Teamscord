@@ -51,7 +51,7 @@ export type NetworkDiagnosticCheck = { name: string; status: "ok" | "error" | "w
 export type NetworkDiagnostics = { status: "healthy" | "waiting" | "offline"; summary: string; checks: NetworkDiagnosticCheck[]; connected_peers: number; checked_at: number };
 
 export type NetworkStatus = "starting" | "online" | "offline" | "syncing" | "preview" | "reconnecting";
-export type SyncStatus = { group_id: string; state: "idle" | "syncing" | "synced" | "error"; updated_at: number; error?: string | null };
+export type SyncStatus = { group_id: string; state: "idle" | "syncing" | "synced" | "waiting" | "error"; updated_at: number; error?: string | null };
 export type UserPreferences = {
   theme: "dark" | "light" | "system";
   font: "manrope" | "system" | "mono";
