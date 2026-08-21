@@ -13,5 +13,4 @@ COPY --from=build /build/target/release/teamscord-relay /usr/local/bin/teamscord
 RUN mkdir -p /app/data
 ENV TEAMSCORD_RELAY_IDENTITY_PATH=/app/data/identity.bin
 EXPOSE 4001/tcp 4002/udp
-VOLUME ["/app/data"]
 ENTRYPOINT ["/usr/local/bin/teamscord-relay"]
