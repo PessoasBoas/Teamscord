@@ -1,0 +1,13 @@
+flowchart LR
+    source["GitHub main"] --> checks["npm run check"]
+    checks --> build["Tauri NSIS build"]
+    build --> checksum["SHA-256 checksum"]
+    checksum --> release["GitHub Release"]
+    relaySource["infra/relay Dockerfile"] --> railwayAuth{"Railway authenticated?"}
+    railwayAuth -->|"Yes"| relayDeploy["Railway relay service"]
+    railwayAuth -->|"No"| blocked["Deployment blocked"]
+    relayDeploy --> volume["Persistent volume /app/data"]
+    relayDeploy --> proxy["TCP Proxy port 4001"]
+    proxy --> defaultRelay["TEAMSCORD_DEFAULT_RELAY_ADDRESS"]
+    defaultRelay --> build
+

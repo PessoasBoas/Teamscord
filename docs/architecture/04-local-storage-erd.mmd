@@ -1,0 +1,98 @@
+erDiagram
+    GROUPS ||--o{ CHANNELS : contains
+    GROUPS ||--o{ MESSAGES : owns
+    GROUPS ||--o{ GROUP_MEMBERS : includes
+    GROUPS ||--o{ AUDIT_EVENTS : records
+    GROUPS ||--o{ KEY_EPOCHS : rotates
+    GROUPS ||--o{ CHANNEL_PERMISSIONS : configures
+    CHANNELS ||--o{ MESSAGES : receives
+    PEERS ||--o{ PEER_ADDRESSES : announces
+    PEERS ||--o{ SYNC_CURSORS : tracks
+    GROUP_MEMBERS ||--o{ KEY_SHARES : receives
+    MESSAGES ||--o{ MESSAGE_DELETIONS : tombstones
+
+    GROUPS {
+        string id PK
+        string ownerPeerId
+        string name
+        int currentKeyEpoch
+        datetime createdAt
+    }
+    CHANNELS {
+        string id PK
+        string groupId FK
+        string name
+        string kind
+        int position
+    }
+    MESSAGES {
+        string eventId PK
+        string groupId FK
+        string channelId FK
+        string authorPeerId
+        int keyEpoch
+        datetime createdAt
+    }
+    GROUP_MEMBERS {
+        string groupId PK, FK
+        string peerId PK
+        string role
+        string status
+        datetime updatedAt
+    }
+    AUDIT_EVENTS {
+        string eventId PK
+        string groupId FK
+        string issuerPeerId
+        string kind
+        datetime logicalTimestamp
+    }
+    KEY_EPOCHS {
+        string groupId PK, FK
+        int epoch PK
+        string createdBy
+        bytes keyHash
+    }
+    KEY_SHARES {
+        string groupId PK, FK
+        int epoch PK
+        string recipientPeerId
+        bytes ciphertext
+    }
+    CHANNEL_PERMISSIONS {
+        string channelId PK, FK
+        string role PK
+        bool canJoinVoice
+        bool canShareScreen
+    }
+    MESSAGE_DELETIONS {
+        string messageId PK
+        string groupId
+        string channelId
+        string deletedBy
+    }
+    PEERS {
+        string peerId PK
+        datetime lastSeen
+    }
+    PEER_ADDRESSES {
+        string peerId PK, FK
+        string address PK
+        string source
+        datetime lastSeen
+    }
+    SYNC_CURSORS {
+        string peerId PK, FK
+        string groupId PK
+        string channelId PK
+        int lastCreatedAt
+        string lastEventId
+    }
+    OUTBOX {
+        string eventId PK
+        string kind
+        text payload
+        datetime createdAt
+        int attempts
+    }
+

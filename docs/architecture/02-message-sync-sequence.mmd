@@ -1,0 +1,24 @@
+sequenceDiagram
+    title Signed invite and cursor synchronization
+    participant OwnerNode
+    participant OwnerDB
+    participant Relay
+    participant MemberNode
+    participant MemberDB
+
+    OwnerNode->>Relay: Dial TCP relay
+    MemberNode->>Relay: Dial TCP relay
+    Relay-->>OwnerNode: Relay reservation
+    Relay-->>MemberNode: Relay reservation
+    MemberNode->>OwnerNode: Accept signed invite
+    OwnerNode-->>MemberNode: Identify and contacts
+    MemberNode->>MemberDB: Store group and key epoch
+    MemberNode->>OwnerNode: Request sync cursor
+    OwnerNode->>OwnerDB: Read messages and controls
+    OwnerDB-->>OwnerNode: Ordered event page
+    OwnerNode-->>MemberNode: Idempotent sync page
+    MemberNode->>MemberDB: Verify, deduplicate, persist
+    MemberNode->>OwnerNode: Publish encrypted message
+    OwnerNode->>OwnerDB: Persist outbox event
+    OwnerNode-->>MemberNode: GossipSub delivery
+

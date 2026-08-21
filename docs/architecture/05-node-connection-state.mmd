@@ -1,0 +1,17 @@
+stateDiagram-v2
+    direction LR
+
+    [*] --> Starting
+    Starting --> Listening: transport ready
+    Listening --> DirectConnecting: mDNS or known contact
+    Listening --> RelayConnecting: relay configured
+    DirectConnecting --> Online: presence verified
+    RelayConnecting --> Online: relay connected
+    Online --> Syncing: cursor request
+    Syncing --> Online: sync complete
+    Online --> Online: heartbeat
+    Online --> Reconnecting: connection lost
+    Reconnecting --> Online: backoff succeeds
+    Reconnecting --> Offline: all paths failed
+    Offline --> Starting: app restart
+

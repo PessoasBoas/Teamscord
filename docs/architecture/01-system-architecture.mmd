@@ -1,0 +1,33 @@
+flowchart LR
+    subgraph client ["Desktop Nodes"]
+        desktopA["Windows node A"]
+        desktopB["Windows node B"]
+    end
+
+    subgraph gateway ["P2P Gateway"]
+        tcpRelay["Railway TCP relay"]
+    end
+
+    subgraph service ["Node Protocols"]
+        syncService["Sync and presence"]
+        callService["Call signaling"]
+    end
+
+    subgraph datastore ["Local Persistence"]
+        sqlite["SQLite"]
+        credentials["Windows Credential Manager"]
+    end
+
+    subgraph async ["Realtime Events"]
+        gossip["GossipSub topics"]
+    end
+
+    desktopA -->|"TCP libp2p"| tcpRelay
+    desktopB -->|"TCP libp2p"| tcpRelay
+    tcpRelay -->|"Circuit and discovery"| syncService
+    tcpRelay -->|"Circuit and discovery"| callService
+    syncService -->|"Messages and cursors"| sqlite
+    syncService -->|"Identity and group keys"| credentials
+    callService -->|"Call keys"| credentials
+    syncService -.->|"Publish realtime events"| gossip
+

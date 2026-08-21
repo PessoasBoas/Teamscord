@@ -1,0 +1,24 @@
+sequenceDiagram
+    title Presence, signaling and WebRTC media
+    participant NodeA
+    participant Relay
+    participant NodeB
+    participant WebRTC
+
+    NodeA->>Relay: Connect transport
+    NodeB->>Relay: Connect transport
+    NodeA->>NodeB: Signed call presence
+    NodeB-->>NodeA: Presence response
+    NodeA->>NodeB: Join signal
+    NodeB-->>NodeA: Join response
+    NodeA->>NodeB: SDP offer
+    NodeB-->>NodeA: SDP answer
+    NodeA->>NodeB: ICE candidates
+    NodeB-->>NodeA: ICE candidates
+    NodeA->>WebRTC: Add microphone track
+    NodeB->>WebRTC: Establish DTLS-SRTP
+    WebRTC-->>NodeA: Remote audio track
+    NodeA->>NodeB: Screen start signal
+    WebRTC-->>NodeB: Screen and system audio track
+    NodeA->>NodeB: Leave signal
+
