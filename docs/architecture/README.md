@@ -63,14 +63,15 @@ O código do relay está em infra/relay/README.md. Em Railway:
 4. variável TEAMSCORD_RELAY_ENABLE_QUIC=false;
 5. volume persistente em /app/data;
 6. TCP Proxy público apontando para a porta interna 4001;
-7. endereço final no formato libp2p com o PeerId do relay;
-8. build desktop com TEAMSCORD_DEFAULT_RELAY_ADDRESS definido.
+7. variável TEAMSCORD_RELAY_PUBLIC_ADDRESS com o host e a porta pública do proxy, sem PeerId;
+8. endereço final no formato libp2p com o PeerId do relay;
+9. build desktop com TEAMSCORD_DEFAULT_RELAY_ADDRESS definido.
 
 ### Estado verificado nesta documentação
 
 O GitHub está publicado em main, com a release [v0.3.0](https://github.com/PessoasBoas/Teamscord/releases/tag/v0.3.0) e os assets NSIS/checksum.
 
-Na verificação desta documentação, o CLI Railway respondeu “No linked project found” e a criação de Teamscord-Relay retornou “Unauthorized”; por isso o diagrama de deploy mantém o ramo de autenticação como pendente e o instalador v0.3.0 não contém um endereço público de relay embutido. O app ainda aceita relay manual pelo painel e funciona em conexão direta/LAN.
+Na verificação desta documentação, o projeto Teamscord-Relay está publicado no workspace pessoal, com volume persistente e TCP Proxy ativo. O relay anuncia o endereço público e o app recebe o multiaddr padrão no build de release; o relay não armazena mensagens e o histórico continua local nos nodes.
 
 ## Comandos
 

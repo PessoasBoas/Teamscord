@@ -75,6 +75,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if enable_quic {
         swarm.listen_on(format!("/ip4/0.0.0.0/udp/{quic_port}/quic-v1").parse()?)?;
     }
+    if let Ok(public_address) = env::var("TEAMSCORD_RELAY_PUBLIC_ADDRESS") {
+        let public_address: libp2p::Multiaddr = public_address.parse()?;
+        swarm.add_external_address(public_address.clone());
+        println!("announcing external relay address: {public_address}");
+    }
     println!("Teamscord relay online: {peer_id} (tcp={tcp_port}, quic={enable_quic})");
 
     loop {
@@ -169,7 +174,11 @@ mod tests {
                 )) if peer_id == relay_peer_id => {
                     reservation_accepted = true;
                 }
-                _ => {}
+                event => {
+                    if env::var_os("TEAMSCORD_TEST_VERBOSE").is_some() {
+                        eprintln!("relay test event: {event:?}");
+                    }
+                }
             }
             if address_reported && reservation_accepted {
                 return;
@@ -250,5 +259,59 @@ mod tests {
         .expect("relay circuit timeout");
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEAMSCORD_TEST_RELAY_ADDRESS"]
+    async fn two_clients_exchange_connection_through_remote_relay() {
+        let relay_address: Multiaddr = env::var("TEAMSCORD_TEST_RELAY_ADDRESS")
+            .expect("TEAMSCORD_TEST_RELAY_ADDRESS is required")
+            .parse()
+            .expect("remote relay address must be a valid multiaddr");
+        let relay_peer_id = relay_address
+            .iter()
+            .find_map(|protocol| match protocol {
+                Protocol::P2p(peer_id) => Some(peer_id),
+                _ => None,
+            })
+            .expect("remote relay address must include its PeerId");
+        let first_relay_address = relay_address.clone().with(Protocol::P2pCircuit);
+        let second_relay_address = relay_address.clone().with(Protocol::P2pCircuit);
+
+        let mut first = build_client();
+        let mut second = build_client();
+        let first_peer_id = *first.local_peer_id();
+        let second_peer_id = *second.local_peer_id();
+        first
+            .listen_on(first_relay_address.clone())
+            .expect("first remote reservation");
+        second
+            .listen_on(second_relay_address.clone())
+            .expect("second remote reservation");
+
+        let expected_first_address = first_relay_address.with(Protocol::P2p(first_peer_id));
+        let expected_second_address = second_relay_address.with(Protocol::P2p(second_peer_id));
+        tokio::time::timeout(
+            Duration::from_secs(45),
+            futures::future::join(
+                wait_for_reservation(&mut first, &expected_first_address, relay_peer_id),
+                wait_for_reservation(&mut second, &expected_second_address, relay_peer_id),
+            ),
+        )
+        .await
+        .expect("remote relay reservation timeout");
+
+        first
+            .dial(expected_second_address)
+            .expect("dial second client through remote relay");
+        tokio::time::timeout(
+            Duration::from_secs(45),
+            futures::future::join(
+                wait_for_peer(&mut first, second_peer_id),
+                wait_for_peer(&mut second, first_peer_id),
+            ),
+        )
+        .await
+        .expect("remote relay circuit timeout");
     }
 }

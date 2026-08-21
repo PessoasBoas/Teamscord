@@ -28,9 +28,16 @@ O Railway deve usar o diretório `infra/relay` como raiz do serviço, o `Dockerf
 TEAMSCORD_RELAY_TCP_PORT=4001
 TEAMSCORD_RELAY_ENABLE_QUIC=false
 TEAMSCORD_RELAY_IDENTITY_PATH=/app/data/identity.bin
+TEAMSCORD_RELAY_PUBLIC_ADDRESS=/dns4/SEU_HOST_TCP_PROXY/tcp/PORTA_PUBLICA
 ```
 
-Depois do deploy, habilite um TCP Proxy público para a porta interna `4001`. O endereço usado no aplicativo precisa incluir o host, a porta pública do proxy e o `PeerId` exibido nos logs:
+Depois do deploy, habilite um TCP Proxy público para a porta interna `4001`. Configure `TEAMSCORD_RELAY_PUBLIC_ADDRESS` com o host e a porta pública do proxy, sem o `PeerId`; o relay usará esse endereço para anunciar reservas:
+
+```text
+/dns4/SEU_HOST_TCP_PROXY/tcp/PORTA_PUBLICA
+```
+
+O endereço usado no aplicativo inclui o host, a porta pública do proxy e o `PeerId` exibido nos logs:
 
 ```text
 /dns4/SEU_HOST_TCP_PROXY/tcp/PORTA_PUBLICA/p2p/PEER_ID_DO_RELAY
