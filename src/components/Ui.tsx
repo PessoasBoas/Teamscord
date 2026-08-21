@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 
 export function ModalHeader({ eyebrow, title, onClose }: { eyebrow: string; title: string; onClose: () => void }) {
@@ -6,9 +7,11 @@ export function ModalHeader({ eyebrow, title, onClose }: { eyebrow: string; titl
 }
 
 export function MenuCard({ className, children }: { className?: string; children: ReactNode }) {
-  return <div className={`menu-card ${className ?? ""}`} onClick={(event) => event.stopPropagation()}>{children}</div>;
+  const card = <div className={`menu-card ${className ?? ""}`} onClick={(event) => event.stopPropagation()}>{children}</div>;
+  return typeof document === "undefined" ? card : createPortal(card, document.body);
 }
 
 export function PopoverPanel({ className, title, onClose, children }: { className?: string; title: string; onClose: () => void; children: ReactNode }) {
-  return <section className={`popover-panel ${className ?? ""}`}><header><strong>{title}</strong><button className="icon-button" onClick={onClose} aria-label="Fechar"><X size={14} /></button></header>{children}</section>;
+  const panel = <section className={`popover-panel ${className ?? ""}`} role="dialog" aria-label={title} onClick={(event) => event.stopPropagation()}><header><div><span className="popover-kicker">CENTRAL</span><strong>{title}</strong></div><button className="icon-button" onClick={onClose} aria-label="Fechar"><X size={16} /></button></header>{children}</section>;
+  return typeof document === "undefined" ? panel : createPortal(panel, document.body);
 }
