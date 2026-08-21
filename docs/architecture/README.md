@@ -68,7 +68,7 @@ O código do relay está em infra/relay/README.md. Em Railway:
 
 ### Estado verificado nesta documentação
 
-O GitHub está publicado em main no commit 4eae030, com a release [v0.3.0](https://github.com/PessoasBoas/Teamscord/releases/tag/v0.3.0) e os assets NSIS/checksum.
+O GitHub está publicado em main no commit a229688, com a release [v0.3.0](https://github.com/PessoasBoas/Teamscord/releases/tag/v0.3.0) e os assets NSIS/checksum.
 
 Na verificação desta documentação, o CLI Railway respondeu “No linked project found” e a criação de Teamscord-Relay retornou “Unauthorized”; por isso o diagrama de deploy mantém o ramo de autenticação como pendente e o instalador v0.3.0 não contém um endereço público de relay embutido. O app ainda aceita relay manual pelo painel e funciona em conexão direta/LAN.
 
@@ -98,4 +98,3 @@ Get-ChildItem $diagramDir -Filter *.mmd | ForEach-Object {
 - Bridge frontend: src/lib/tauri.ts
 - WebRTC: src/lib/webrtc.ts
 - Relay: infra/relay/src/main.rs
-
