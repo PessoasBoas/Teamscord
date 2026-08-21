@@ -73,6 +73,13 @@ O GitHub está publicado em main, com a release [v0.3.1](https://github.com/Pess
 
 Na verificação desta documentação, o projeto Teamscord-Relay está publicado no workspace pessoal, com volume persistente e TCP Proxy ativo. O relay anuncia o endereço público e o app recebe o multiaddr padrão no build de release; o relay não armazena mensagens e o histórico continua local nos nodes.
 
+Dados verificados da implantação atual:
+
+- TCP Proxy: `altaria.proxy.rlwy.net:46712` para a porta interna `4001`.
+- PeerId do relay: `12D3KooWNw8qUoVxFy8XcRkXhwPF4rdGjz4mqRf3hgqnoJbBvtwt`.
+- Multiaddr do aplicativo: `/dns4/altaria.proxy.rlwy.net/tcp/46712/p2p/12D3KooWNw8qUoVxFy8XcRkXhwPF4rdGjz4mqRf3hgqnoJbBvtwt`.
+- Volume Railway: `/app/data`, usado para preservar a identidade do relay.
+
 ## Comandos
 
 ~~~powershell
