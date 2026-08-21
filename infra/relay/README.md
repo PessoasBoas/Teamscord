@@ -19,3 +19,21 @@ O endereço para configurar no app deve incluir o peer id retornado pelo relay, 
 O volume `relay-data` mantém a identidade do relay entre atualizações. Para produção pública, use firewall, limites de recursos e monitoramento da VPS.
 
 O transporte libp2p usa Noise sobre TCP e QUIC; não há endpoint HTTP neste pacote que exija certificado TLS. Se a VPS usar proxy ou painel externo para observabilidade, mantenha esse acesso separado e protegido por HTTPS/TLS; não exponha o volume de identidade nem as portas do relay sem firewall.
+
+## Deploy no Railway
+
+O Railway deve usar o diretório `infra/relay` como raiz do serviço, o `Dockerfile` desta pasta e um volume persistente montado em `/app/data`. Configure:
+
+```text
+TEAMSCORD_RELAY_TCP_PORT=4001
+TEAMSCORD_RELAY_ENABLE_QUIC=false
+TEAMSCORD_RELAY_IDENTITY_PATH=/app/data/identity.bin
+```
+
+Depois do deploy, habilite um TCP Proxy público para a porta interna `4001`. O endereço usado no aplicativo precisa incluir o host, a porta pública do proxy e o `PeerId` exibido nos logs:
+
+```text
+/dns4/SEU_HOST_TCP_PROXY/tcp/PORTA_PUBLICA/p2p/PEER_ID_DO_RELAY
+```
+
+O TCP Proxy do Railway é o caminho suportado para este relay; QUIC continua disponível quando o serviço for hospedado em uma VPS com UDP liberado. O relay não persiste mensagens, membros ou chamadas, e o volume `/app/data` só preserva a identidade Ed25519 para que o `PeerId` não mude após reinício. Não coloque tokens, senhas ou certificados no repositório.

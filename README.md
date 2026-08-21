@@ -1,6 +1,6 @@
 # Teamscord
 
-Teamscord 0.2.3 é um chat de grupos privados com um node local por instalação. Mensagens, eventos administrativos e épocas de chave são sincronizados entre peers; áudio e compartilhamento de tela usam uma malha WebRTC P2P opcional.
+Teamscord 0.3.0 é um chat de grupos privados com um node local por instalação. Mensagens, eventos administrativos, presença e épocas de chave são sincronizados entre peers por libp2p; áudio e compartilhamento de tela usam uma malha WebRTC P2P opcional.
 
 ## Stack
 
@@ -34,7 +34,7 @@ npm run release
 
 O comando gera o `.exe` em `src-tauri/target/release/bundle/nsis` e um arquivo `.sha256`. O Windows pode mostrar um aviso do SmartScreen até o produto possuir certificado de assinatura. O app consulta periodicamente a release estável de `PessoasBoas/Teamscord`; quando encontra uma versão maior, mostra um popup com link para o instalador NSIS e as notas da versão. A instalação continua manual e confirmada pelo usuário: não há atualização silenciosa nem auto-update embutido nesta versão.
 
-Ao publicar uma versão, crie uma GitHub Release com uma tag semver (por exemplo `v0.2.3`) e anexe o `.exe` x64 gerado junto com o `.sha256`. O verificador só aceita releases estáveis, URLs do repositório oficial e o instalador cujo nome termina em `_x64-setup.exe`.
+Ao publicar uma versão, crie uma GitHub Release com uma tag semver (por exemplo `v0.3.0`) e anexe o `.exe` x64 gerado junto com o `.sha256`. O verificador só aceita releases estáveis, URLs do repositório oficial e o instalador cujo nome termina em `_x64-setup.exe`.
 
 ## Grupos e rede
 
@@ -42,7 +42,9 @@ Crie um grupo no app e compartilhe o convite assinado. O convite expira em 30 di
 
 Para ajudar conexões atrás de NAT, há um relay opcional em [infra/relay](infra/relay/README.md). Para mídia WebRTC fora da LAN, configure um Coturn opcional em [infra/turn](infra/turn/README.md); o app aceita ICE/STUN/TURN sem embutir servidor, domínio ou credenciais.
 
-## Controles e mídia 0.2
+O endereço público do relay da release é injetado no build pela variável `TEAMSCORD_DEFAULT_RELAY_ADDRESS`; quando ela não está definida, o app continua funcionando em conexão direta/LAN e permite adicionar relays pelo painel de rede.
+
+## Controles, presença e mídia 0.3
 
 O grupo tem cargos fixos `Owner`, `Admin`, `Mod` e `Member`. A interface oferece membros, permissões por canal, canais, convites e auditoria; ações destrutivas exigem confirmação. O Owner é a raiz de autoridade; um Admin só pode alterar `Mod`/`Member` quando sua concessão de Admin foi registrada por um evento assinado pelo Owner. Owner, Admin e Mod podem apagar mensagens conforme a matriz de permissões. Expulsão e banimento encerram o acesso futuro ao rotacionar a chave do grupo e distribuir a nova época somente aos membros ativos.
 
@@ -56,8 +58,8 @@ Calls têm limite de 8 participantes e uma tela compartilhada por vez, sem câme
 
 ### Gate manual antes da beta de mídia
 
-1. No PC A, instale o NSIS, crie um servidor e compartilhe o convite assinado e um endereço `listen` substituindo `0.0.0.0` pelo IP local.
-2. No PC B, instale a mesma versão, entre pelo convite, conecte-se ao endereço do PC A e confirme no topo `node online`, `sincronizado` e os dois membros.
+1. No PC A, instale o NSIS, crie um servidor e compartilhe o convite assinado; com relay configurado, os contatos de rede seguem dentro do convite.
+2. No PC B, instale a mesma versão, entre pelo convite e confirme no topo `node online`, `relay conectado`/conexão direta, `sincronizado` e os dois membros.
 3. Envie uma mensagem em cada PC, feche e reabra um deles e confirme que o histórico e a lista de membros continuam presentes.
 4. Em um canal de voz, entre nos dois PCs, aceite o microfone, navegue para outro canal sem sair da call, alterne mute/deafened, troque o dispositivo e confirme a presença/conexão de cada participante.
 5. Compartilhe uma tela, valide áudio do sistema quando disponível, pare manualmente, feche a janela de captura e reconecte; a segunda tela deve ser recusada enquanto a primeira estiver ativa.

@@ -43,7 +43,7 @@ function App() {
   const [historyRevision, setHistoryRevision] = useState(0);
   const [draft, setDraft] = useState("");
   const [members, setMembers] = useState<GroupMember[]>([]);
-  const [node, setNode] = useState<NodeSnapshot>({ peer_id: "", listen_addresses: [], connected_peers: 0, is_running: false, relay_addresses: [], bootstrap_addresses: [] });
+  const [node, setNode] = useState<NodeSnapshot>({ peer_id: "", listen_addresses: [], connected_peers: 0, is_running: false, relay_addresses: [], bootstrap_addresses: [], relay_connected: false, last_sync_at: null });
   const [connectedPeerIds, setConnectedPeerIds] = useState<Set<string>>(() => new Set());
   const [nodeStatus, setNodeStatus] = useState<NetworkStatus>(isDesktop() ? "starting" : "preview");
   const [syncLabel, setSyncLabel] = useState("aguardando sincronização");
@@ -209,9 +209,22 @@ function App() {
           if (event.kind === "peer-updated" && event.data) {
             const peer = event.data as { peer_id?: string; state?: string };
             const peerId = peer.peer_id;
-            if (peerId) setConnectedPeerIds((current) => { const next = new Set(current); if (peer.state === "connected") next.add(peerId); else if (peer.state === "disconnected") next.delete(peerId); return next; });
-            setNodeStatus(peer.state === "disconnected" ? "reconnecting" : "online");
-            if (peer.state === "connected") void callRef.current?.reannounce().catch((reason) => setError(String(reason)));
+            setNodeStatus(peer.state === "disconnected" ? "reconnecting" : "syncing");
+          }
+          if (event.kind === "peer-presence" && event.data) {
+            const presence = event.data as { peer_id?: string; state?: string };
+            if (presence.peer_id) setConnectedPeerIds((current) => {
+              const next = new Set(current);
+              if (presence.state === "online") next.add(presence.peer_id!);
+              else if (presence.state === "offline") next.delete(presence.peer_id!);
+              return next;
+            });
+            setNodeStatus(presence.state === "offline" ? "reconnecting" : "online");
+            if (presence.state === "online") void callRef.current?.reannounce().catch((reason) => setError(String(reason)));
+          }
+          if (event.kind === "relay-state" && event.data) {
+            const relay = event.data as { state?: string };
+            setFeedback(relay.state === "connected" ? "relay conectado" : "relay desconectado — tentando conexão direta");
           }
           if (event.data && (event.kind === "group-control" || event.kind === "member-updated")) {
             const control = event.data as { group_id?: string; kind?: string; target_peer_id?: string | null };

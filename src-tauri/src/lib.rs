@@ -19,6 +19,7 @@ use libp2p::{
     gossipsub::{self, IdentTopic, MessageAuthenticity},
     identify,
     identity::Keypair,
+    mdns,
     multiaddr::Protocol,
     noise, ping, relay,
     request_response::{self, ProtocolSupport},
@@ -47,8 +48,9 @@ use crate::{
         X25519_KEY_BYTES,
     },
     protocol::{
-        aad_for_envelope, signing_bytes, CallSignal, CallSignalBody, MessageEnvelope, SyncRequest,
-        SyncResponse, CALL_SIGNAL_PROTOCOL, SYNC_PROTOCOL,
+        aad_for_envelope, signing_bytes, CallSignal, CallSignalBody, MessageEnvelope,
+        PresenceAnnouncement, PresenceCall, SyncRequest, SyncResponse, CALL_SIGNAL_PROTOCOL,
+        PRESENCE_PROTOCOL, SYNC_PROTOCOL,
     },
     storage::{
         AuditEventRecord, ChannelPermissionRecord, ChannelRecord, Database, GroupRecord,
@@ -66,6 +68,15 @@ const MEDIA_CONFIG_SERVICE: &str = "com.teamscord.desktop.media";
 const MEDIA_CONFIG_USERNAME: &str = "ice-servers";
 const MAX_CALL_PARTICIPANTS: usize = 8;
 
+fn default_relay_addresses() -> Vec<String> {
+    option_env!("TEAMSCORD_DEFAULT_RELAY_ADDRESS")
+        .into_iter()
+        .map(str::trim)
+        .filter(|address| !address.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeSnapshot {
     pub peer_id: String,
@@ -74,6 +85,10 @@ pub struct NodeSnapshot {
     pub is_running: bool,
     pub relay_addresses: Vec<String>,
     pub bootstrap_addresses: Vec<String>,
+    #[serde(default)]
+    pub relay_connected: bool,
+    #[serde(default)]
+    pub last_sync_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -179,6 +194,45 @@ pub struct NetworkConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeContact {
+    pub peer_id: String,
+    pub addresses: Vec<String>,
+    pub source: String,
+    pub last_seen: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelayStatus {
+    pub address: String,
+    pub peer_id: Option<String>,
+    pub state: String,
+    pub last_seen: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PeerPresence {
+    pub peer_id: String,
+    pub state: String,
+    pub last_seen: i64,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConnectionDiagnostic {
+    pub peer_id: String,
+    pub state: String,
+    pub detail: String,
+    pub checked_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkStatusView {
+    pub snapshot: NodeSnapshot,
+    pub relays: Vec<RelayStatus>,
+    pub peers: Vec<NodeContact>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct NodeEvent {
     kind: String,
     message: Option<ChatMessage>,
@@ -195,6 +249,7 @@ enum NodeCommand {
     PublishCall { signal: Box<CallSignal> },
     SubscribeGroup { group_id: String },
     RequestSync,
+    BroadcastPresence,
 }
 
 #[derive(Clone)]
@@ -218,7 +273,16 @@ impl NodeState {
         fs::create_dir_all(&data_dir)
             .map_err(|error| format!("não foi possível criar dados do app: {error}"))?;
         let database = Arc::new(Database::open(data_dir.join("teamscord.sqlite"))?);
-        let network_config = load_network_config(&data_dir)?;
+        let mut network_config = load_network_config(&data_dir)?;
+        for address in default_relay_addresses() {
+            if !network_config
+                .relay_addresses
+                .iter()
+                .any(|item| item == &address)
+            {
+                network_config.relay_addresses.push(address);
+            }
+        }
         Ok(Self {
             database,
             data_dir: Arc::new(data_dir),
@@ -230,6 +294,8 @@ impl NodeState {
                 is_running: false,
                 relay_addresses: network_config.relay_addresses.clone(),
                 bootstrap_addresses: network_config.bootstrap_addresses.clone(),
+                relay_connected: false,
+                last_sync_at: None,
             })),
             command_tx: Arc::new(Mutex::new(None)),
             network_config: Arc::new(Mutex::new(network_config)),
@@ -247,10 +313,12 @@ impl NodeState {
 struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     identify: identify::Behaviour,
+    mdns: mdns::tokio::Behaviour,
     ping: ping::Behaviour,
     relay: relay::client::Behaviour,
     sync: request_response::json::Behaviour<SyncRequest, SyncResponse>,
     call_signal: request_response::json::Behaviour<CallSignal, CallSignal>,
+    presence: request_response::json::Behaviour<PresenceAnnouncement, PresenceAnnouncement>,
 }
 
 #[tauri::command]
@@ -287,6 +355,8 @@ async fn start_node(app: AppHandle, state: State<'_, NodeState>) -> Result<NodeS
         is_running: true,
         relay_addresses,
         bootstrap_addresses,
+        relay_connected: false,
+        last_sync_at: None,
     };
     *state
         .snapshot
@@ -318,6 +388,106 @@ fn get_node_snapshot(state: State<'_, NodeState>) -> Result<NodeSnapshot, String
         .lock()
         .map(|snapshot| snapshot.clone())
         .map_err(|_| "estado do node indisponível".into())
+}
+
+#[tauri::command]
+fn get_known_peers(state: State<'_, NodeState>) -> Result<Vec<NodeContact>, String> {
+    let mut grouped = HashMap::<String, NodeContact>::new();
+    for record in state.database.list_peer_addresses()? {
+        let entry = grouped
+            .entry(record.peer_id.clone())
+            .or_insert_with(|| NodeContact {
+                peer_id: record.peer_id.clone(),
+                addresses: Vec::new(),
+                source: record.source.clone(),
+                last_seen: record.last_seen,
+            });
+        if !entry.addresses.contains(&record.address) {
+            entry.addresses.push(record.address);
+        }
+        entry.last_seen = entry.last_seen.max(record.last_seen);
+    }
+    Ok(grouped.into_values().collect())
+}
+
+#[tauri::command]
+fn get_network_status(state: State<'_, NodeState>) -> Result<NetworkStatusView, String> {
+    let snapshot = state
+        .snapshot
+        .lock()
+        .map_err(|_| "estado do node indisponível")?
+        .clone();
+    let relays = snapshot
+        .relay_addresses
+        .iter()
+        .map(|address| RelayStatus {
+            peer_id: address.parse::<Multiaddr>().ok().and_then(|multiaddr| {
+                multiaddr.iter().find_map(|protocol| match protocol {
+                    Protocol::P2p(peer_id) => Some(peer_id.to_string()),
+                    _ => None,
+                })
+            }),
+            state: if snapshot.relay_connected {
+                "connected"
+            } else if snapshot.is_running {
+                "connecting"
+            } else {
+                "offline"
+            }
+            .into(),
+            address: address.clone(),
+            last_seen: snapshot.relay_connected.then_some(now_millis()),
+        })
+        .collect();
+    Ok(NetworkStatusView {
+        snapshot,
+        relays,
+        peers: get_known_peers(state)?,
+    })
+}
+
+#[tauri::command]
+fn test_peer_connection(
+    address: String,
+    app: AppHandle,
+    state: State<'_, NodeState>,
+) -> Result<ConnectionDiagnostic, String> {
+    let address = address
+        .parse::<Multiaddr>()
+        .map_err(|error| format!("multiaddress inválido: {error}"))?;
+    let peer_id = address
+        .iter()
+        .find_map(|protocol| match protocol {
+            Protocol::P2p(peer_id) => Some(peer_id.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "desconhecido".into());
+    let sender = state
+        .command_tx
+        .lock()
+        .map_err(|_| "controle do node indisponível")?
+        .clone()
+        .ok_or("node ainda não iniciou")?;
+    sender
+        .send(NodeCommand::Dial { address })
+        .map_err(|_| "node não está aceitando conexões".to_string())?;
+    let diagnostic = ConnectionDiagnostic {
+        peer_id,
+        state: "dialing".into(),
+        detail: "tentativa de conexão enviada ao node".into(),
+        checked_at: now_millis(),
+    };
+    let _ = app.emit(
+        EVENT_NAME,
+        NodeEvent {
+            kind: "connection-diagnostic".into(),
+            message: None,
+            snapshot: None,
+            error: None,
+            data: Some(serde_json::to_value(&diagnostic).map_err(|error| error.to_string())?),
+        },
+    );
+    Ok(diagnostic)
 }
 
 #[tauri::command]
@@ -592,7 +762,7 @@ fn create_group(name: String, state: State<'_, NodeState>) -> Result<GroupCreate
         updated_at: group.created_at,
     })?;
     subscribe_group_if_running(&state, &group.id);
-    let invite = crypto::create_invite(
+    let invite = crypto::create_invite_with_contacts(
         &keypair,
         &group.id,
         &group.name,
@@ -601,6 +771,7 @@ fn create_group(name: String, state: State<'_, NodeState>) -> Result<GroupCreate
         &group_key,
         group.current_key_epoch,
         &BASE64.encode(agreement_public),
+        &contact_addresses(&state),
         now_seconds() + 30 * 24 * 60 * 60,
     )?;
     Ok(GroupCreateResult {
@@ -628,7 +799,7 @@ fn create_invite(group_id: String, state: State<'_, NodeState>) -> Result<String
     let expires_at = now_seconds() + 30 * 24 * 60 * 60;
     if actor_peer_id == group.owner_peer_id {
         let (_, agreement_public) = ensure_agreement_keypair()?;
-        crypto::create_invite(
+        crypto::create_invite_with_contacts(
             &keypair,
             &group.id,
             &group.name,
@@ -637,6 +808,7 @@ fn create_invite(group_id: String, state: State<'_, NodeState>) -> Result<String
             &group_key,
             group.current_key_epoch,
             &BASE64.encode(agreement_public),
+            &contact_addresses(&state),
             expires_at,
         )
     } else {
@@ -647,7 +819,7 @@ fn create_invite(group_id: String, state: State<'_, NodeState>) -> Result<String
         if owner.x25519_public_key.len() != X25519_KEY_BYTES {
             return Err("chave de acordo do Owner ainda não sincronizada".into());
         }
-        crypto::create_delegated_invite(
+        crypto::create_delegated_invite_with_contacts(
             &keypair,
             &group.owner_peer_id,
             &BASE64.encode(owner.public_key),
@@ -658,6 +830,7 @@ fn create_invite(group_id: String, state: State<'_, NodeState>) -> Result<String
             &group_key,
             group.current_key_epoch,
             &BASE64.encode(owner.x25519_public_key.as_slice()),
+            &contact_addresses(&state),
             expires_at,
         )
     }
@@ -775,6 +948,27 @@ fn join_group(
         submit_control_event(&app, &state, event)?;
     }
     subscribe_group_if_running(&state, &group.id);
+    for raw_address in &payload.contact_addresses {
+        let Ok(address) = raw_address.parse::<Multiaddr>() else {
+            continue;
+        };
+        if let Some(peer_id) = address.iter().find_map(|protocol| match protocol {
+            Protocol::P2p(peer_id) => Some(peer_id),
+            _ => None,
+        }) {
+            let _ = state.database.remember_peer_address(
+                &peer_id.to_string(),
+                raw_address,
+                "invite",
+                now_millis(),
+            );
+        }
+        if let Ok(sender) = state.command_tx.lock() {
+            if let Some(sender) = sender.clone() {
+                let _ = sender.send(NodeCommand::Dial { address });
+            }
+        }
+    }
     group_view(&state.database, group)
 }
 
@@ -1270,6 +1464,7 @@ fn join_call(
         return Err(error);
     }
     emit_call_state(&app, &state, &call_state)?;
+    request_presence_broadcast(&state);
     Ok(call_state)
 }
 
@@ -1311,6 +1506,7 @@ fn leave_call(
         snapshot
     };
     emit_call_state(&app, &state, &remaining)?;
+    request_presence_broadcast(&state);
     Ok(())
 }
 
@@ -1656,11 +1852,16 @@ fn send_message(
     if !state.database.insert_message(&envelope)? {
         return Err("evento de mensagem duplicado".into());
     }
-    sender
-        .send(NodeCommand::Publish {
-            envelope: Box::new(envelope.clone()),
-        })
-        .map_err(|_| "node não está aceitando mensagens".to_string())?;
+    state.database.enqueue_outbox(
+        &envelope.event_id,
+        "message",
+        &serde_json::to_string(&envelope)
+            .map_err(|error| format!("não foi possível preparar mensagem: {error}"))?,
+        envelope.created_at,
+    )?;
+    let _ = sender.send(NodeCommand::Publish {
+        envelope: Box::new(envelope.clone()),
+    });
     let mut message = envelope_to_chat(&envelope, &group_key)?;
     message.mine = message.author_peer_id == local_peer_id;
     Ok(message)
@@ -1958,7 +2159,7 @@ fn validate_join_event(state: &NodeState, event: &ControlEvent) -> Result<(), St
             return Err("convite contém chave de acordo de outro Owner".into());
         }
     }
-    if matches!(invite.version, 2 | 4 | 6) {
+    if matches!(invite.version, 2 | 4 | 6 | 8) {
         let issuer_peer_id = invite
             .issuer_peer_id
             .as_deref()
@@ -1981,7 +2182,7 @@ fn validate_join_event(state: &NodeState, event: &ControlEvent) -> Result<(), St
         {
             return Err("emissor do convite não possui permissão vigente".into());
         }
-    } else if !matches!(invite.version, 1 | 3 | 5) {
+    } else if !matches!(invite.version, 1 | 3 | 5 | 7) {
         return Err("tipo de convite de entrada inválido".into());
     }
     Ok(())
@@ -2219,6 +2420,13 @@ fn submit_control_event(
     if !state.database.insert_audit_event(&control_record(&event))? {
         return Err("evento administrativo duplicado".into());
     }
+    state.database.enqueue_outbox(
+        &event.event_id,
+        "control",
+        &serde_json::to_string(&event)
+            .map_err(|error| format!("não foi possível preparar evento administrativo: {error}"))?,
+        event.logical_timestamp,
+    )?;
     apply_control_event(state, &event)?;
     if matches!(
         event.kind.as_str(),
@@ -2247,11 +2455,10 @@ fn submit_control_event(
             data: Some(serde_json::to_value(&event).map_err(|error| error.to_string())?),
         },
     );
-    sender
-        .send(NodeCommand::PublishControl {
-            event: Box::new(event),
-        })
-        .map_err(|_| "node não está aceitando eventos administrativos".to_string())
+    let _ = sender.send(NodeCommand::PublishControl {
+        event: Box::new(event),
+    });
+    Ok(())
 }
 
 fn rotate_group_key(app: &AppHandle, state: &NodeState, group_id: &str) -> Result<(), String> {
@@ -2649,7 +2856,7 @@ async fn run_node(
     )
     .map_err(|error| format!("GossipSub indisponível: {error}"))?;
     let identify = identify::Behaviour::new(identify::Config::new(
-        "/teamscord/0.2.0".into(),
+        "/teamscord/0.3.0".into(),
         keypair.public(),
     ));
     let ping = ping::Behaviour::new(ping::Config::new());
@@ -2666,6 +2873,16 @@ async fn run_node(
         request_response::Config::default()
             .with_request_timeout(std::time::Duration::from_secs(10)),
     );
+    let presence = request_response::json::Behaviour::new(
+        [(
+            StreamProtocol::new(PRESENCE_PROTOCOL),
+            ProtocolSupport::Full,
+        )],
+        request_response::Config::default()
+            .with_request_timeout(std::time::Duration::from_secs(10)),
+    );
+    let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), keypair.public().to_peer_id())
+        .map_err(|error| format!("mDNS indisponível: {error}"))?;
     let mut swarm: Swarm<Behaviour> = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
         .with_tcp(
@@ -2680,10 +2897,12 @@ async fn run_node(
         .with_behaviour(|_, relay| Behaviour {
             gossipsub,
             identify,
+            mdns,
             ping,
             relay,
             sync,
             call_signal,
+            presence,
         })
         .expect("comportamento P2P deveria ser construído sem erro")
         .build();
@@ -2691,6 +2910,18 @@ async fn run_node(
     listen_on(&mut swarm, "/ip4/0.0.0.0/udp/0/quic-v1")?;
     let mut subscribed = HashSet::new();
     let mut known_peer_addresses: HashMap<PeerId, Vec<Multiaddr>> = HashMap::new();
+    for record in state.database.list_peer_addresses()? {
+        let Ok(peer_id) = record.peer_id.parse::<PeerId>() else {
+            continue;
+        };
+        let Ok(address) = record.address.parse::<Multiaddr>() else {
+            continue;
+        };
+        remember_peer_address(&mut known_peer_addresses, &address);
+        known_peer_addresses
+            .entry(peer_id)
+            .or_insert_with(|| vec![address]);
+    }
     for group in state.database.list_groups()? {
         subscribe_group(&mut swarm, &state.database, &group.id, &mut subscribed)?;
     }
@@ -2734,8 +2965,17 @@ async fn run_node(
             data: None,
         },
     );
+    let mut presence_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+    presence_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = presence_heartbeat.tick() => {
+                if let Ok(announcement) = local_presence_announcement(&state) {
+                    for peer_id in swarm.connected_peers().copied().collect::<Vec<_>>() {
+                        swarm.behaviour_mut().presence.send_request(&peer_id, announcement.clone());
+                    }
+                }
+            }
             Some(command) = command_rx.recv() => match command {
                 NodeCommand::Dial { address } => {
                     remember_peer_address(&mut known_peer_addresses, &address);
@@ -2749,14 +2989,26 @@ async fn run_node(
                 }
                 NodeCommand::RequestSync => {
                     if let Err(error) = request_sync_all(&mut swarm, &state.database) { emit_error(&app, error); }
+                    if let Err(error) = flush_outbox(&mut swarm, &state, &app) { emit_error(&app, error); }
+                }
+                NodeCommand::BroadcastPresence => {
+                    if let Ok(announcement) = local_presence_announcement(&state) {
+                        for peer_id in swarm.connected_peers().copied().collect::<Vec<_>>() {
+                            swarm.behaviour_mut().presence.send_request(&peer_id, announcement.clone());
+                        }
+                    }
                 }
                 NodeCommand::Publish { envelope } => {
                     let envelope = *envelope;
                     let topic = IdentTopic::new(topic_for(&envelope.channel_id));
                     match serde_json::to_vec(&envelope) {
-                        Ok(payload) => if let Err(error) = swarm.behaviour_mut().gossipsub.publish(topic, payload) {
-                            if is_waiting_publish_error(&error) { emit_sync_waiting(&app); }
-                            else { emit_error(&app, format!("não foi possível publicar: {error}")); }
+                        Ok(payload) => match swarm.behaviour_mut().gossipsub.publish(topic, payload) {
+                            Ok(_) => { let _ = state.database.remove_outbox(&envelope.event_id); }
+                            Err(error) => {
+                                let _ = state.database.mark_outbox_attempt(&envelope.event_id, now_millis());
+                                if is_waiting_publish_error(&error) { emit_sync_waiting(&app); }
+                                else { emit_error(&app, format!("não foi possível publicar: {error}")); }
+                            }
                         },
                         Err(error) => emit_error(&app, format!("mensagem inválida: {error}")),
                     }
@@ -2765,9 +3017,13 @@ async fn run_node(
                     let event = *event;
                     let topic = IdentTopic::new(topic_for_control(&event.group_id));
                     match serde_json::to_vec(&event) {
-                        Ok(payload) => if let Err(error) = swarm.behaviour_mut().gossipsub.publish(topic, payload) {
-                            if is_waiting_publish_error(&error) { emit_sync_waiting(&app); }
-                            else { emit_error(&app, format!("não foi possível publicar evento administrativo: {error}")); }
+                        Ok(payload) => match swarm.behaviour_mut().gossipsub.publish(topic, payload) {
+                            Ok(_) => { let _ = state.database.remove_outbox(&event.event_id); }
+                            Err(error) => {
+                                let _ = state.database.mark_outbox_attempt(&event.event_id, now_millis());
+                                if is_waiting_publish_error(&error) { emit_sync_waiting(&app); }
+                                else { emit_error(&app, format!("não foi possível publicar evento administrativo: {error}")); }
+                            }
                         },
                         Err(error) => emit_error(&app, format!("evento administrativo inválido: {error}")),
                     }
@@ -2785,13 +3041,23 @@ async fn run_node(
             },
             event = swarm.select_next_some() => match event {
                 SwarmEvent::NewListenAddr { address, .. } => {
-                    if let Ok(mut snapshot) = state.snapshot.lock() {
-                        if !snapshot.listen_addresses.contains(&address.to_string()) { snapshot.listen_addresses.push(address.to_string()); }
-                        emit_snapshot(&app, &snapshot);
+                    if let Some(address) = announced_address(address, swarm.local_peer_id()) {
+                        if let Ok(mut snapshot) = state.snapshot.lock() {
+                            if !snapshot.listen_addresses.contains(&address.to_string()) { snapshot.listen_addresses.push(address.to_string()); }
+                            emit_snapshot(&app, &snapshot);
+                        }
                     }
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    if let Ok(mut snapshot) = state.snapshot.lock() { snapshot.connected_peers += 1; emit_snapshot(&app, &snapshot); }
+                    swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                    if let Ok(mut snapshot) = state.snapshot.lock() {
+                        snapshot.connected_peers += 1;
+                        if snapshot.relay_addresses.iter().any(|address| relay_peer_id(address).as_ref() == Some(&peer_id)) {
+                            snapshot.relay_connected = true;
+                            emit_network_event(&app, "relay-state", serde_json::json!({ "peer_id": peer_id.to_string(), "state": "connected" }));
+                        }
+                        emit_snapshot(&app, &snapshot);
+                    }
                     let _ = state.database.remember_peer(&peer_id.to_string(), now_millis());
                     let _ = app.emit(
                         EVENT_NAME,
@@ -2803,10 +3069,43 @@ async fn run_node(
                             data: Some(serde_json::json!({ "peer_id": peer_id.to_string(), "state": "connected" })),
                         },
                     );
+                    emit_peer_presence(&app, &peer_id, "connecting", "connection");
+                    emit_network_event(
+                        &app,
+                        "connection-diagnostic",
+                        serde_json::json!({
+                            "peer_id": peer_id.to_string(),
+                            "state": "connected",
+                            "detail": "transporte libp2p conectado",
+                            "checked_at": now_millis(),
+                        }),
+                    );
                     let _ = request_sync(&mut swarm, &state.database, &peer_id);
+                    if let Err(error) = flush_outbox(&mut swarm, &state, &app) { emit_error(&app, error); }
+                    if let Ok(announcement) = local_presence_announcement(&state) {
+                        swarm.behaviour_mut().presence.send_request(&peer_id, announcement);
+                    }
                 }
                 SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
-                    if let Ok(mut snapshot) = state.snapshot.lock() { snapshot.connected_peers = snapshot.connected_peers.saturating_sub(1); emit_snapshot(&app, &snapshot); }
+                    if let Ok(mut snapshot) = state.snapshot.lock() {
+                        snapshot.connected_peers = snapshot.connected_peers.saturating_sub(1);
+                        if snapshot.relay_addresses.iter().any(|address| relay_peer_id(address).as_ref() == Some(&peer_id)) && num_established == 0 {
+                            snapshot.relay_connected = false;
+                            emit_network_event(&app, "relay-state", serde_json::json!({ "peer_id": peer_id.to_string(), "state": "offline" }));
+                        }
+                        emit_snapshot(&app, &snapshot);
+                    }
+                    emit_peer_presence(&app, &peer_id, "offline", "connection");
+                    emit_network_event(
+                        &app,
+                        "connection-diagnostic",
+                        serde_json::json!({
+                            "peer_id": peer_id.to_string(),
+                            "state": "reconnecting",
+                            "detail": "conexão encerrada; endereços conhecidos serão tentados novamente",
+                            "checked_at": now_millis(),
+                        }),
+                    );
                     let _ = app.emit(
                         EVENT_NAME,
                         NodeEvent {
@@ -2835,9 +3134,28 @@ async fn run_node(
                         .listen_addrs
                         .into_iter()
                         .filter(|address| !address.iter().any(|protocol| matches!(protocol, Protocol::P2pCircuit)))
+                        .filter_map(|address| announced_address(address, &peer_id))
                         .collect::<Vec<_>>();
                     if !addresses.is_empty() {
-                        known_peer_addresses.insert(peer_id, addresses);
+                        for address in &addresses {
+                            remember_peer_address(&mut known_peer_addresses, address);
+                            let _ = state.database.remember_peer_address(&peer_id.to_string(), &address.to_string(), "identify", now_millis());
+                        }
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
+                    for (peer_id, address) in peers {
+                        if peer_id == *swarm.local_peer_id() {
+                            continue;
+                        }
+                        let address = peer_dial_address(address, &peer_id);
+                        remember_peer_address(&mut known_peer_addresses, &address);
+                        let _ = state.database.remember_peer_address(&peer_id.to_string(), &address.to_string(), "mdns", now_millis());
+                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                        emit_peer_presence(&app, &peer_id, "connecting", "mdns");
+                        if let Err(error) = swarm.dial(address) {
+                            emit_error(&app, format!("não foi possível conectar ao peer descoberto na LAN: {error}"));
+                        }
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message { message, .. })) => {
@@ -2877,6 +3195,20 @@ async fn run_node(
                                 data: Some(serde_json::json!({ "state": "synced" })),
                             },
                         );
+                        if let Ok(mut snapshot) = state.snapshot.lock() {
+                            snapshot.last_sync_at = Some(now_millis());
+                            emit_snapshot(&app, &snapshot);
+                        }
+                        emit_network_event(
+                            &app,
+                            "sync-progress",
+                            serde_json::json!({
+                                "peer_id": peer.to_string(),
+                                "state": "synced",
+                                "messages": response.messages.len(),
+                                "controls": response.controls.len(),
+                            }),
+                        );
                     }
                 },
                 SwarmEvent::Behaviour(BehaviourEvent::Sync(request_response::Event::OutboundFailure { error, .. })) => emit_error(&app, format!("sincronização falhou: {error}")),
@@ -2894,6 +3226,23 @@ async fn run_node(
                     }
                 },
                 SwarmEvent::Behaviour(BehaviourEvent::CallSignal(request_response::Event::OutboundFailure { error, .. })) => emit_media_error(&app, format!("sinal de call não entregue: {error}")),
+                SwarmEvent::Behaviour(BehaviourEvent::Presence(request_response::Event::Message { peer, message, .. })) => match message {
+                    request_response::Message::Request { request, channel, .. } => {
+                        if let Err(error) = process_presence(&app, &state, request) {
+                            emit_error(&app, error);
+                        }
+                        if let Ok(announcement) = local_presence_announcement(&state) {
+                            let _ = swarm.behaviour_mut().presence.send_response(channel, announcement);
+                        }
+                        let _ = peer;
+                    }
+                    request_response::Message::Response { response, .. } => {
+                        if let Err(error) = process_presence(&app, &state, response) {
+                            emit_error(&app, error);
+                        }
+                    }
+                },
+                SwarmEvent::Behaviour(BehaviourEvent::Presence(request_response::Event::OutboundFailure { error, .. })) => emit_error(&app, format!("presença não entregue: {error}")),
                 _ => {}
             }
         }
@@ -2909,6 +3258,273 @@ fn peer_dial_address(address: Multiaddr, peer_id: &PeerId) -> Multiaddr {
     } else {
         address.with(Protocol::P2p(*peer_id))
     }
+}
+
+fn relay_peer_id(address: &str) -> Option<PeerId> {
+    address
+        .parse::<Multiaddr>()
+        .ok()?
+        .iter()
+        .find_map(|protocol| match protocol {
+            Protocol::P2p(peer_id) => Some(peer_id),
+            _ => None,
+        })
+}
+
+fn emit_network_event(app: &AppHandle, kind: &str, data: serde_json::Value) {
+    let _ = app.emit(
+        EVENT_NAME,
+        NodeEvent {
+            kind: kind.into(),
+            message: None,
+            snapshot: None,
+            error: None,
+            data: Some(data),
+        },
+    );
+}
+
+fn contact_addresses(state: &NodeState) -> Vec<String> {
+    let local_peer_id = ensure_keypair(state)
+        .ok()
+        .map(|keypair| keypair.public().to_peer_id());
+    let mut addresses = HashSet::new();
+    if let Ok(snapshot) = state.snapshot.lock() {
+        addresses.extend(snapshot.listen_addresses.iter().cloned());
+    }
+    if let Ok(config) = state.network_config.lock() {
+        for raw in &config.relay_addresses {
+            let Ok(address) = raw.parse::<Multiaddr>() else {
+                continue;
+            };
+            let Some(peer_id) = local_peer_id else {
+                continue;
+            };
+            if address.iter().any(|protocol| match protocol {
+                Protocol::Ip4(ip) => ip.is_unspecified(),
+                Protocol::Ip6(ip) => ip.is_unspecified(),
+                _ => false,
+            }) {
+                continue;
+            }
+            let address = if address
+                .iter()
+                .any(|protocol| matches!(protocol, Protocol::P2pCircuit))
+            {
+                address
+            } else {
+                address.with(Protocol::P2pCircuit)
+            }
+            .with(Protocol::P2p(peer_id));
+            addresses.insert(address.to_string());
+        }
+        for raw in &config.bootstrap_addresses {
+            if let Ok(address) = raw.parse::<Multiaddr>() {
+                if !address.iter().any(|protocol| match protocol {
+                    Protocol::Ip4(ip) => ip.is_unspecified(),
+                    Protocol::Ip6(ip) => ip.is_unspecified(),
+                    _ => false,
+                }) && address
+                    .iter()
+                    .any(|protocol| matches!(protocol, Protocol::P2p(_)))
+                {
+                    addresses.insert(address.to_string());
+                }
+            }
+        }
+    }
+    addresses.into_iter().collect()
+}
+
+fn announced_address(address: Multiaddr, peer_id: &PeerId) -> Option<Multiaddr> {
+    if address.iter().any(|protocol| match protocol {
+        Protocol::Ip4(ip) => ip.is_unspecified(),
+        Protocol::Ip6(ip) => ip.is_unspecified(),
+        _ => false,
+    }) {
+        None
+    } else {
+        Some(peer_dial_address(address, peer_id))
+    }
+}
+
+fn emit_peer_presence(app: &AppHandle, peer_id: &PeerId, state: &str, source: &str) {
+    let _ = app.emit(
+        EVENT_NAME,
+        NodeEvent {
+            kind: "peer-presence".into(),
+            message: None,
+            snapshot: None,
+            error: None,
+            data: Some(serde_json::json!({
+                "peer_id": peer_id.to_string(),
+                "state": state,
+                "last_seen": now_millis(),
+                "source": source,
+            })),
+        },
+    );
+}
+
+fn local_presence_announcement(state: &NodeState) -> Result<PresenceAnnouncement, String> {
+    let keypair = ensure_keypair(state)?;
+    let peer_id = keypair.public().to_peer_id().to_string();
+    let active_calls = state
+        .call_states
+        .lock()
+        .map_err(|_| "estado de call bloqueado")?
+        .values()
+        .filter_map(|call| {
+            call.participants
+                .iter()
+                .find(|participant| participant.peer_id == peer_id)
+                .map(|participant| PresenceCall {
+                    group_id: call.group_id.clone(),
+                    channel_id: call.channel_id.clone(),
+                    call_id: call.call_id.clone(),
+                    display_name: participant.display_name.clone(),
+                })
+        })
+        .collect();
+    let mut announcement = PresenceAnnouncement {
+        event_id: Uuid::new_v4().to_string(),
+        peer_id,
+        public_key: keypair.public().encode_protobuf(),
+        state: "online".into(),
+        active_calls,
+        created_at: now_millis(),
+        signature: Vec::new(),
+    };
+    announcement.signature = keypair
+        .sign(&protocol::presence_signing_bytes(&announcement)?)
+        .map_err(|error| format!("não foi possível assinar presença: {error}"))?;
+    Ok(announcement)
+}
+
+fn request_presence_broadcast(state: &NodeState) {
+    if let Ok(sender) = state.command_tx.lock() {
+        if let Some(sender) = sender.clone() {
+            let _ = sender.send(NodeCommand::BroadcastPresence);
+        }
+    }
+}
+
+fn verify_presence(announcement: &PresenceAnnouncement) -> Result<PeerId, String> {
+    let public_key = libp2p::identity::PublicKey::try_decode_protobuf(&announcement.public_key)
+        .map_err(|error| format!("chave pública de presença inválida: {error}"))?;
+    let peer_id = public_key.to_peer_id();
+    if peer_id.to_string() != announcement.peer_id {
+        return Err("presença não corresponde ao PeerId anunciado".into());
+    }
+    if now_millis().saturating_sub(announcement.created_at).abs() > 120_000 {
+        return Err("presença expirada".into());
+    }
+    if !public_key.verify(
+        &protocol::presence_signing_bytes(announcement)?,
+        &announcement.signature,
+    ) {
+        return Err("assinatura de presença inválida".into());
+    }
+    Ok(peer_id)
+}
+
+fn process_presence(
+    app: &AppHandle,
+    state: &NodeState,
+    announcement: PresenceAnnouncement,
+) -> Result<(), String> {
+    let peer_id = verify_presence(&announcement)?;
+    let now = now_millis();
+    state.database.remember_peer(&announcement.peer_id, now)?;
+    let active_call_keys = announcement
+        .active_calls
+        .iter()
+        .map(|call| format!("{}:{}:{}", call.group_id, call.channel_id, call.call_id))
+        .collect::<HashSet<_>>();
+    let changed_states = {
+        let mut states = state
+            .call_states
+            .lock()
+            .map_err(|_| "estado de call bloqueado")?;
+        for call in &announcement.active_calls {
+            let key = format!("{}:{}:{}", call.group_id, call.channel_id, call.call_id);
+            let Some(member) = state
+                .database
+                .get_member(&call.group_id, &announcement.peer_id)?
+            else {
+                continue;
+            };
+            let current = states.entry(key).or_insert_with(|| CallState {
+                group_id: call.group_id.clone(),
+                channel_id: call.channel_id.clone(),
+                call_id: call.call_id.clone(),
+                participants: Vec::new(),
+            });
+            if !current
+                .participants
+                .iter()
+                .any(|participant| participant.peer_id == announcement.peer_id)
+            {
+                if current.participants.len() < MAX_CALL_PARTICIPANTS {
+                    current.participants.push(CallParticipant {
+                        peer_id: announcement.peer_id.clone(),
+                        display_name: call.display_name.clone(),
+                        role: member.role,
+                        muted: false,
+                        sharing_screen: false,
+                        connection_state: "connected".into(),
+                    });
+                }
+            } else if let Some(participant) = current
+                .participants
+                .iter_mut()
+                .find(|participant| participant.peer_id == announcement.peer_id)
+            {
+                participant.display_name = call.display_name.clone();
+                participant.connection_state = "connected".into();
+            }
+        }
+        let keys = states.keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            let Some(current) = states.get_mut(&key) else {
+                continue;
+            };
+            if !active_call_keys.contains(&key) {
+                current
+                    .participants
+                    .retain(|participant| participant.peer_id != announcement.peer_id);
+            }
+        }
+        let empty = states
+            .iter()
+            .filter_map(|(key, current)| current.participants.is_empty().then_some(key.clone()))
+            .collect::<Vec<_>>();
+        for key in empty {
+            states.remove(&key);
+        }
+        states.values().cloned().collect::<Vec<_>>()
+    };
+    for call_state in changed_states {
+        emit_call_state(app, state, &call_state)?;
+    }
+    let _ = app.emit(
+        EVENT_NAME,
+        NodeEvent {
+            kind: "peer-presence".into(),
+            message: None,
+            snapshot: None,
+            error: None,
+            data: Some(serde_json::json!({
+                "peer_id": announcement.peer_id,
+                "state": announcement.state,
+                "last_seen": now,
+                "source": "presence",
+                "active_calls": announcement.active_calls,
+            })),
+        },
+    );
+    let _ = peer_id;
+    Ok(())
 }
 
 fn remember_peer_address(
@@ -2983,6 +3599,59 @@ fn subscribe_group(
                 .gossipsub
                 .subscribe(&IdentTopic::new(call_topic))
                 .map_err(|error| format!("não foi possível assinar call: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn flush_outbox(
+    swarm: &mut Swarm<Behaviour>,
+    state: &NodeState,
+    app: &AppHandle,
+) -> Result<(), String> {
+    for record in state.database.list_outbox(500)? {
+        match record.kind.as_str() {
+            "message" => {
+                let envelope: MessageEnvelope = serde_json::from_str(&record.payload)
+                    .map_err(|error| format!("mensagem pendente inválida: {error}"))?;
+                let topic = IdentTopic::new(topic_for(&envelope.channel_id));
+                let payload = serde_json::to_vec(&envelope)
+                    .map_err(|error| format!("mensagem pendente inválida: {error}"))?;
+                match swarm.behaviour_mut().gossipsub.publish(topic, payload) {
+                    Ok(_) => {
+                        state.database.remove_outbox(&record.event_id)?;
+                    }
+                    Err(error) => {
+                        state
+                            .database
+                            .mark_outbox_attempt(&record.event_id, now_millis())?;
+                        if is_waiting_publish_error(&error) {
+                            emit_sync_waiting(app);
+                        }
+                    }
+                }
+            }
+            "control" => {
+                let event: ControlEvent = serde_json::from_str(&record.payload)
+                    .map_err(|error| format!("evento administrativo pendente inválido: {error}"))?;
+                let topic = IdentTopic::new(topic_for_control(&event.group_id));
+                let payload = serde_json::to_vec(&event)
+                    .map_err(|error| format!("evento administrativo pendente inválido: {error}"))?;
+                match swarm.behaviour_mut().gossipsub.publish(topic, payload) {
+                    Ok(_) => {
+                        state.database.remove_outbox(&record.event_id)?;
+                    }
+                    Err(error) => {
+                        state
+                            .database
+                            .mark_outbox_attempt(&record.event_id, now_millis())?;
+                        if is_waiting_publish_error(&error) {
+                            emit_sync_waiting(app);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -4577,6 +5246,9 @@ pub fn run() {
             send_message,
             delete_message,
             connect_peer,
+            get_network_status,
+            get_known_peers,
+            test_peer_connection,
             open_external_url
         ])
         .run(tauri::generate_context!())

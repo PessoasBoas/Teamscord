@@ -32,12 +32,25 @@ fn load_or_create_identity() -> Result<Keypair, Box<dyn std::error::Error>> {
     Ok(keypair)
 }
 
+fn env_bool(name: &str, default: bool) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let keypair = load_or_create_identity()?;
     let peer_id = keypair.public().to_peer_id();
     let tcp_port = env::var("TEAMSCORD_RELAY_TCP_PORT").unwrap_or_else(|_| "4001".into());
     let quic_port = env::var("TEAMSCORD_RELAY_QUIC_PORT").unwrap_or_else(|_| "4002".into());
+    let enable_quic = env_bool("TEAMSCORD_RELAY_ENABLE_QUIC", true);
 
     let mut swarm = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
@@ -59,8 +72,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build();
 
     swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{tcp_port}").parse()?)?;
-    swarm.listen_on(format!("/ip4/0.0.0.0/udp/{quic_port}/quic-v1").parse()?)?;
-    println!("Teamscord relay online: {peer_id}");
+    if enable_quic {
+        swarm.listen_on(format!("/ip4/0.0.0.0/udp/{quic_port}/quic-v1").parse()?)?;
+    }
+    println!("Teamscord relay online: {peer_id} (tcp={tcp_port}, quic={enable_quic})");
 
     loop {
         tokio::select! {

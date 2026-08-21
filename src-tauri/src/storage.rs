@@ -88,6 +88,24 @@ pub struct AuditEventRecord {
     pub signature: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PeerAddressRecord {
+    pub peer_id: String,
+    pub address: String,
+    pub source: String,
+    pub last_seen: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutboxRecord {
+    pub event_id: String,
+    pub kind: String,
+    pub payload: String,
+    pub created_at: i64,
+    pub attempts: i64,
+    pub last_attempt_at: Option<i64>,
+}
+
 pub struct Database {
     connection: Mutex<Connection>,
 }
@@ -164,6 +182,23 @@ impl Database {
                peer_id TEXT PRIMARY KEY,
                last_seen INTEGER NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS peer_addresses (
+               peer_id TEXT NOT NULL,
+               address TEXT NOT NULL,
+               source TEXT NOT NULL,
+               last_seen INTEGER NOT NULL,
+               PRIMARY KEY(peer_id, address)
+             );
+             CREATE INDEX IF NOT EXISTS idx_peer_addresses_seen ON peer_addresses(last_seen DESC);
+             CREATE TABLE IF NOT EXISTS outbox (
+               event_id TEXT PRIMARY KEY,
+               kind TEXT NOT NULL,
+               payload TEXT NOT NULL,
+               created_at INTEGER NOT NULL,
+               attempts INTEGER NOT NULL DEFAULT 0,
+               last_attempt_at INTEGER
+             );
+             CREATE INDEX IF NOT EXISTS idx_outbox_kind ON outbox(kind, created_at, event_id);
              CREATE TABLE IF NOT EXISTS sync_cursors (
                peer_id TEXT NOT NULL,
                group_id TEXT NOT NULL,
@@ -1120,6 +1155,117 @@ impl Database {
         Ok(())
     }
 
+    pub fn remember_peer_address(
+        &self,
+        peer_id: &str,
+        address: &str,
+        source: &str,
+        last_seen: i64,
+    ) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "banco local bloqueado".to_string())?;
+        connection
+            .execute(
+                "INSERT INTO peer_addresses(peer_id, address, source, last_seen) VALUES(?1, ?2, ?3, ?4) ON CONFLICT(peer_id, address) DO UPDATE SET source=excluded.source, last_seen=excluded.last_seen",
+                params![peer_id, address, source, last_seen],
+            )
+            .map_err(|error| format!("não foi possível salvar endereço de peer: {error}"))?;
+        Ok(())
+    }
+
+    pub fn list_peer_addresses(&self) -> Result<Vec<PeerAddressRecord>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "banco local bloqueado".to_string())?;
+        let mut statement = connection
+            .prepare("SELECT peer_id, address, source, last_seen FROM peer_addresses ORDER BY last_seen DESC, peer_id, address")
+            .map_err(|error| format!("não foi possível ler endereços de peers: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(PeerAddressRecord {
+                    peer_id: row.get(0)?,
+                    address: row.get(1)?,
+                    source: row.get(2)?,
+                    last_seen: row.get(3)?,
+                })
+            })
+            .map_err(|error| format!("não foi possível ler endereços de peers: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("não foi possível ler endereços de peers: {error}"))
+    }
+
+    pub fn enqueue_outbox(
+        &self,
+        event_id: &str,
+        kind: &str,
+        payload: &str,
+        created_at: i64,
+    ) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "banco local bloqueado".to_string())?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO outbox(event_id, kind, payload, created_at) VALUES(?1, ?2, ?3, ?4)",
+                params![event_id, kind, payload, created_at],
+            )
+            .map_err(|error| format!("não foi possível enfileirar evento: {error}"))?;
+        Ok(())
+    }
+
+    pub fn list_outbox(&self, limit: u32) -> Result<Vec<OutboxRecord>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "banco local bloqueado".to_string())?;
+        let mut statement = connection
+            .prepare("SELECT event_id, kind, payload, created_at, attempts, last_attempt_at FROM outbox ORDER BY created_at ASC, event_id ASC LIMIT ?1")
+            .map_err(|error| format!("não foi possível ler fila de saída: {error}"))?;
+        let rows = statement
+            .query_map([i64::from(limit.min(1000))], |row| {
+                Ok(OutboxRecord {
+                    event_id: row.get(0)?,
+                    kind: row.get(1)?,
+                    payload: row.get(2)?,
+                    created_at: row.get(3)?,
+                    attempts: row.get(4)?,
+                    last_attempt_at: row.get(5)?,
+                })
+            })
+            .map_err(|error| format!("não foi possível ler fila de saída: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("não foi possível ler fila de saída: {error}"))
+    }
+
+    pub fn mark_outbox_attempt(&self, event_id: &str, attempted_at: i64) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "banco local bloqueado".to_string())?;
+        connection
+            .execute(
+                "UPDATE outbox SET attempts = attempts + 1, last_attempt_at = ?2 WHERE event_id = ?1",
+                params![event_id, attempted_at],
+            )
+            .map_err(|error| format!("não foi possível atualizar fila de saída: {error}"))?;
+        Ok(())
+    }
+
+    pub fn remove_outbox(&self, event_id: &str) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "banco local bloqueado".to_string())?;
+        connection
+            .execute("DELETE FROM outbox WHERE event_id = ?1", [event_id])
+            .map_err(|error| format!("não foi possível confirmar evento enviado: {error}"))?;
+        Ok(())
+    }
+
     pub fn has_group(&self, group_id: &str) -> Result<bool, String> {
         let connection = self
             .connection
@@ -1340,6 +1486,34 @@ mod tests {
                 .expect("updated cursor exists"),
             (10, "event-10".into())
         );
+    }
+
+    #[test]
+    fn peer_contacts_and_outbox_survive_reopen_and_deduplicate() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("teamscord.sqlite");
+        {
+            let database = Database::open(&path).expect("db");
+            database
+                .remember_peer_address("peer-1", "/ip4/127.0.0.1/tcp/4001/p2p/peer-1", "invite", 10)
+                .expect("peer contact");
+            database
+                .enqueue_outbox("event-1", "message", "{}", 11)
+                .expect("outbox");
+            database
+                .enqueue_outbox("event-1", "message", "different", 12)
+                .expect("outbox dedup");
+            assert_eq!(database.list_peer_addresses().unwrap().len(), 1);
+            assert_eq!(database.list_outbox(20).unwrap().len(), 1);
+        }
+        let database = Database::open(&path).expect("reopen db");
+        assert_eq!(database.list_peer_addresses().unwrap()[0].source, "invite");
+        assert_eq!(database.list_outbox(20).unwrap()[0].payload, "{}");
+        database
+            .mark_outbox_attempt("event-1", 13)
+            .expect("attempt");
+        database.remove_outbox("event-1").expect("ack");
+        assert!(database.list_outbox(20).unwrap().is_empty());
     }
 
     #[test]

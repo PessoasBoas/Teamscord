@@ -46,6 +46,8 @@ export type NodeSnapshot = {
   is_running: boolean;
   relay_addresses: string[];
   bootstrap_addresses: string[];
+  relay_connected: boolean;
+  last_sync_at?: number | null;
 };
 export type NetworkDiagnosticCheck = { name: string; status: "ok" | "error" | "waiting" | "info"; detail: string };
 export type NetworkDiagnostics = { status: "healthy" | "waiting" | "offline"; summary: string; checks: NetworkDiagnosticCheck[]; connected_peers: number; checked_at: number };
@@ -65,6 +67,13 @@ export type NetworkConfig = {
   relay_addresses: string[];
   bootstrap_addresses: string[];
 };
+
+export type NodeContact = { peer_id: string; addresses: string[]; source: string; last_seen: number };
+export type RelayStatus = { address: string; peer_id?: string | null; state: "connected" | "connecting" | "offline"; last_seen?: number | null };
+export type PeerPresence = { peer_id: string; state: string; last_seen: number; source: string; active_calls?: PresenceCall[] };
+export type ConnectionDiagnostic = { peer_id: string; state: string; detail: string; checked_at: number };
+export type NetworkStatusView = { snapshot: NodeSnapshot; relays: RelayStatus[]; peers: NodeContact[] };
+export type PresenceCall = { group_id: string; channel_id: string; call_id: string; display_name: string };
 
 export type GroupCreateResult = {
   group: Group;
@@ -106,7 +115,7 @@ export type CallSignal = { event_id: string; group_id: string; channel_id: strin
 export type CallSignalEvent = { signal: Record<string, unknown>; body: { to_peer_id?: string | null; kind: string; payload: Record<string, unknown> } };
 
 export type NodeEvent = {
-  kind: "ready" | "snapshot" | "message" | "error" | "group-control" | "member-updated" | "channel-updated" | "call-signal" | "call-state" | "media-error" | "key-epoch-changed" | "sync-state" | "peer-updated";
+  kind: "ready" | "snapshot" | "message" | "error" | "group-control" | "member-updated" | "channel-updated" | "call-signal" | "call-state" | "media-error" | "key-epoch-changed" | "sync-state" | "peer-updated" | "relay-state" | "peer-presence" | "sync-progress" | "connection-diagnostic";
   message?: ChatMessage;
   snapshot?: NodeSnapshot;
   error?: string;
@@ -118,6 +127,8 @@ export const isDesktop = () => typeof window !== "undefined" && "__TAURI_INTERNA
 export const nodeApi = {
   startNode: () => invoke<NodeSnapshot>("start_node"),
   getNodeSnapshot: () => invoke<NodeSnapshot>("get_node_snapshot"),
+  getNetworkStatus: () => invoke<NetworkStatusView>("get_network_status"),
+  getKnownPeers: () => invoke<NodeContact[]>("get_known_peers"),
   runNetworkDiagnostics: () => invoke<NetworkDiagnostics>("run_network_diagnostics"),
   getNetworkConfig: () => invoke<NetworkConfig>("get_network_config"),
   setNetworkConfig: (relayAddresses: string[], bootstrapAddresses: string[] = []) => invoke<NetworkConfig>("set_network_config", { relayAddresses, bootstrapAddresses }),
@@ -154,6 +165,7 @@ export const nodeApi = {
   requestCallMute: (groupId: string, channelId: string, callId: string, peerId: string, muted: boolean) => invoke<void>("request_call_mute", { groupId, channelId, callId, peerId, muted }),
   getCallState: (groupId: string, channelId: string, callId: string) => invoke<CallState>("get_call_state", { groupId, channelId, callId }),
   connectPeer: (address: string) => invoke<void>("connect_peer", { address }),
+  testPeerConnection: (address: string) => invoke<ConnectionDiagnostic>("test_peer_connection", { address }),
   openExternalUrl: (url: string) => invoke<void>("open_external_url", { url }),
   onNodeEvent: (handler: (event: NodeEvent) => void): Promise<UnlistenFn> => listen<NodeEvent>("node://event", (event) => handler(event.payload)),
 };

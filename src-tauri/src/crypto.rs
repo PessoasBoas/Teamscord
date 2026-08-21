@@ -37,6 +37,8 @@ pub struct InvitePayload {
     pub issuer_public_key: Option<String>,
     #[serde(default)]
     pub issuer_signature: Option<String>,
+    #[serde(default)]
+    pub contact_addresses: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -97,6 +99,40 @@ struct LegacyUnsignedIssuedInvite<'a> {
     expires_at: i64,
     issuer_peer_id: &'a str,
     issuer_public_key: &'a str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct UnsignedInviteV2<'a> {
+    version: u8,
+    group_id: &'a str,
+    group_name: &'a str,
+    initials: &'a str,
+    color: &'a str,
+    owner_peer_id: &'a str,
+    owner_public_key: &'a str,
+    owner_x25519_public_key: &'a str,
+    group_key: &'a str,
+    key_epoch: i64,
+    expires_at: i64,
+    contact_addresses: &'a [String],
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct UnsignedIssuedInviteV2<'a> {
+    version: u8,
+    group_id: &'a str,
+    group_name: &'a str,
+    initials: &'a str,
+    color: &'a str,
+    owner_peer_id: &'a str,
+    owner_public_key: &'a str,
+    owner_x25519_public_key: &'a str,
+    group_key: &'a str,
+    key_epoch: i64,
+    expires_at: i64,
+    issuer_peer_id: &'a str,
+    issuer_public_key: &'a str,
+    contact_addresses: &'a [String],
 }
 
 fn default_key_epoch() -> i64 {
@@ -168,6 +204,7 @@ pub fn decode_invite(invite: &str) -> Result<InvitePayload, String> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub fn create_invite(
     keypair: &Keypair,
     group_id: &str,
@@ -179,11 +216,38 @@ pub fn create_invite(
     owner_x25519_public_key: &str,
     expires_at: i64,
 ) -> Result<String, String> {
+    create_invite_with_contacts(
+        keypair,
+        group_id,
+        group_name,
+        initials,
+        color,
+        group_key,
+        key_epoch,
+        owner_x25519_public_key,
+        &[],
+        expires_at,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_invite_with_contacts(
+    keypair: &Keypair,
+    group_id: &str,
+    group_name: &str,
+    initials: &str,
+    color: &str,
+    group_key: &[u8; GROUP_KEY_BYTES],
+    key_epoch: i64,
+    owner_x25519_public_key: &str,
+    contact_addresses: &[String],
+    expires_at: i64,
+) -> Result<String, String> {
     let owner_public_key = BASE64.encode(keypair.public().encode_protobuf());
     let owner_peer_id = keypair.public().to_peer_id().to_string();
     let group_key_encoded = BASE64.encode(group_key);
-    let unsigned = UnsignedInvite {
-        version: 5,
+    let unsigned = UnsignedInviteV2 {
+        version: 7,
         group_id,
         group_name,
         initials,
@@ -194,6 +258,7 @@ pub fn create_invite(
         group_key: &group_key_encoded,
         key_epoch,
         expires_at,
+        contact_addresses,
     };
     let signing_bytes = serde_json::to_vec(&unsigned)
         .map_err(|error| format!("não foi possível assinar convite: {error}"))?;
@@ -216,10 +281,12 @@ pub fn create_invite(
         issuer_peer_id: None,
         issuer_public_key: None,
         issuer_signature: None,
+        contact_addresses: contact_addresses.to_vec(),
     })
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub fn create_delegated_invite(
     issuer_keypair: &Keypair,
     owner_peer_id: &str,
@@ -233,11 +300,42 @@ pub fn create_delegated_invite(
     owner_x25519_public_key: &str,
     expires_at: i64,
 ) -> Result<String, String> {
+    create_delegated_invite_with_contacts(
+        issuer_keypair,
+        owner_peer_id,
+        owner_public_key,
+        group_id,
+        group_name,
+        initials,
+        color,
+        group_key,
+        key_epoch,
+        owner_x25519_public_key,
+        &[],
+        expires_at,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_delegated_invite_with_contacts(
+    issuer_keypair: &Keypair,
+    owner_peer_id: &str,
+    owner_public_key: &str,
+    group_id: &str,
+    group_name: &str,
+    initials: &str,
+    color: &str,
+    group_key: &[u8; GROUP_KEY_BYTES],
+    key_epoch: i64,
+    owner_x25519_public_key: &str,
+    contact_addresses: &[String],
+    expires_at: i64,
+) -> Result<String, String> {
     let issuer_public_key = BASE64.encode(issuer_keypair.public().encode_protobuf());
     let issuer_peer_id = issuer_keypair.public().to_peer_id().to_string();
     let group_key_encoded = BASE64.encode(group_key);
-    let unsigned = UnsignedIssuedInvite {
-        version: 6,
+    let unsigned = UnsignedIssuedInviteV2 {
+        version: 8,
         group_id,
         group_name,
         initials,
@@ -250,6 +348,7 @@ pub fn create_delegated_invite(
         expires_at,
         issuer_peer_id: &issuer_peer_id,
         issuer_public_key: &issuer_public_key,
+        contact_addresses,
     };
     let signing_bytes = serde_json::to_vec(&unsigned)
         .map_err(|error| format!("não foi possível assinar convite delegado: {error}"))?;
@@ -272,11 +371,12 @@ pub fn create_delegated_invite(
         issuer_peer_id: Some(issuer_peer_id),
         issuer_public_key: Some(issuer_public_key),
         issuer_signature: Some(BASE64.encode(signature)),
+        contact_addresses: contact_addresses.to_vec(),
     })
 }
 
 pub fn validate_invite(invite: &InvitePayload, now: i64) -> Result<[u8; GROUP_KEY_BYTES], String> {
-    if !matches!(invite.version, 1..=6) {
+    if !matches!(invite.version, 1..=8) {
         return Err("versão de convite não suportada".into());
     }
     if invite.expires_at < now {
@@ -290,7 +390,7 @@ pub fn validate_invite(invite: &InvitePayload, now: i64) -> Result<[u8; GROUP_KE
     if public_key.to_peer_id().to_string() != invite.owner_peer_id {
         return Err("peer id do convite não corresponde à chave pública".into());
     }
-    if invite.version == 2 || invite.version == 4 || invite.version == 6 {
+    if invite.version == 2 || invite.version == 4 || invite.version == 6 || invite.version == 8 {
         let issuer_peer_id = invite
             .issuer_peer_id
             .as_deref()
@@ -311,7 +411,27 @@ pub fn validate_invite(invite: &InvitePayload, now: i64) -> Result<[u8; GROUP_KE
         if issuer_public_key.to_peer_id().to_string() != issuer_peer_id {
             return Err("peer id do emissor não corresponde à chave pública".into());
         }
-        let signing_bytes = if invite.version == 6 {
+        let signing_bytes = if invite.version == 8 {
+            serde_json::to_vec(&UnsignedIssuedInviteV2 {
+                version: invite.version,
+                group_id: &invite.group_id,
+                group_name: &invite.group_name,
+                initials: &invite.initials,
+                color: &invite.color,
+                owner_peer_id: &invite.owner_peer_id,
+                owner_public_key: &invite.owner_public_key,
+                owner_x25519_public_key: invite
+                    .owner_x25519_public_key
+                    .as_deref()
+                    .ok_or("chave de acordo do Owner ausente")?,
+                group_key: &invite.group_key,
+                key_epoch: invite.key_epoch,
+                expires_at: invite.expires_at,
+                issuer_peer_id,
+                issuer_public_key: issuer_public_key_encoded,
+                contact_addresses: &invite.contact_addresses,
+            })
+        } else if invite.version == 6 {
             serde_json::to_vec(&UnsignedIssuedInvite {
                 version: invite.version,
                 group_id: &invite.group_id,
@@ -353,7 +473,25 @@ pub fn validate_invite(invite: &InvitePayload, now: i64) -> Result<[u8; GROUP_KE
             return Err("assinatura do emissor inválida".into());
         }
     } else {
-        let signing_bytes = if invite.version == 5 {
+        let signing_bytes = if invite.version == 7 {
+            serde_json::to_vec(&UnsignedInviteV2 {
+                version: invite.version,
+                group_id: &invite.group_id,
+                group_name: &invite.group_name,
+                initials: &invite.initials,
+                color: &invite.color,
+                owner_peer_id: &invite.owner_peer_id,
+                owner_public_key: &invite.owner_public_key,
+                owner_x25519_public_key: invite
+                    .owner_x25519_public_key
+                    .as_deref()
+                    .ok_or("chave de acordo do Owner ausente")?,
+                group_key: &invite.group_key,
+                key_epoch: invite.key_epoch,
+                expires_at: invite.expires_at,
+                contact_addresses: &invite.contact_addresses,
+            })
+        } else if invite.version == 5 {
             serde_json::to_vec(&UnsignedInvite {
                 version: invite.version,
                 group_id: &invite.group_id,

@@ -4,6 +4,7 @@ use crate::access::ControlEvent;
 
 pub const SYNC_PROTOCOL: &str = "/teamscord/sync/1";
 pub const CALL_SIGNAL_PROTOCOL: &str = "/teamscord/call-signal/1";
+pub const PRESENCE_PROTOCOL: &str = "/teamscord/presence/1";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MessageEnvelope {
@@ -62,6 +63,25 @@ pub struct CallSignalBody {
     pub payload: serde_json::Value,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PresenceCall {
+    pub group_id: String,
+    pub channel_id: String,
+    pub call_id: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PresenceAnnouncement {
+    pub event_id: String,
+    pub peer_id: String,
+    pub public_key: Vec<u8>,
+    pub state: String,
+    pub active_calls: Vec<PresenceCall>,
+    pub created_at: i64,
+    pub signature: Vec<u8>,
+}
+
 pub fn signing_bytes(envelope: &MessageEnvelope) -> Result<Vec<u8>, String> {
     let mut unsigned = envelope.clone();
     unsigned.signature.clear();
@@ -99,4 +119,10 @@ pub fn call_signal_aad(signal: &CallSignal) -> Result<Vec<u8>, String> {
         signal.created_at,
     ))
     .map_err(|error| format!("AAD de call inválido: {error}"))
+}
+
+pub fn presence_signing_bytes(announcement: &PresenceAnnouncement) -> Result<Vec<u8>, String> {
+    let mut unsigned = announcement.clone();
+    unsigned.signature.clear();
+    serde_json::to_vec(&unsigned).map_err(|error| format!("presença inválida: {error}"))
 }
