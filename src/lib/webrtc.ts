@@ -35,6 +35,12 @@ export class MeshCall {
   private closed = false;
   private muted = false;
   private audioInputDeviceId: string | undefined;
+  private inputVolume = 1;
+  private inputAudioContext: AudioContext | null = null;
+  private inputSource: MediaStreamAudioSourceNode | null = null;
+  private inputGain: GainNode | null = null;
+  private inputDestination: MediaStreamAudioDestinationNode | null = null;
+  private rawInputStream: MediaStream | null = null;
 
   constructor(
     private readonly groupId: string,
@@ -43,20 +49,24 @@ export class MeshCall {
     private readonly callbacks: CallCallbacks = {},
     audioInputDeviceId?: string,
     initialMuted = false,
+    inputVolume = 1,
+    private readonly displayName = "Membro",
   ) {
     this.audioInputDeviceId = audioInputDeviceId || undefined;
     this.muted = initialMuted;
+    this.inputVolume = Math.min(1, Math.max(0, inputVolume));
   }
 
   async start(): Promise<CallState> {
     try {
       this.mediaConfig = iceConfiguration((await nodeApi.getMediaConfig()).ice_servers);
       if (!navigator.mediaDevices?.getUserMedia) throw new Error("WebRTC não está disponível neste WebView2");
-      this.localStream = await navigator.mediaDevices.getUserMedia({ audio: this.audioInputDeviceId ? { deviceId: { exact: this.audioInputDeviceId } } : true, video: false });
+      const rawStream = await navigator.mediaDevices.getUserMedia({ audio: this.audioInputDeviceId ? { deviceId: { exact: this.audioInputDeviceId } } : true, video: false });
+      this.localStream = await this.createProcessedInputStream(rawStream);
       this.watchAudioTracks(this.localStream);
       this.localStream.getAudioTracks().forEach((track) => { track.enabled = !this.muted; });
       this.callbacks.onLocalStream?.(this.localStream);
-      this.state = await nodeApi.joinCall(this.groupId, this.channelId);
+      this.state = await nodeApi.joinCall(this.groupId, this.channelId, undefined, this.displayName);
       this.emitState();
       if (this.muted) await this.setMuted(true);
       return this.state;
@@ -178,15 +188,16 @@ export class MeshCall {
 
   async setAudioInputDevice(deviceId: string): Promise<void> {
     if (this.closed || !this.localStream || !navigator.mediaDevices?.getUserMedia) return;
-    const nextStream = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { deviceId: { exact: deviceId } } : true, video: false });
+    const previous = { raw: this.rawInputStream, source: this.inputSource, gain: this.inputGain, destination: this.inputDestination, stream: this.localStream };
+    const rawNextStream = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { deviceId: { exact: deviceId } } : true, video: false });
+    const nextStream = await this.createProcessedInputStream(rawNextStream);
     const nextTrack = nextStream.getAudioTracks()[0];
     if (!nextTrack) {
-      nextStream.getTracks().forEach((track) => track.stop());
+      rawNextStream.getTracks().forEach((track) => track.stop());
       throw new Error("o dispositivo selecionado não disponibilizou microfone");
     }
     nextTrack.enabled = !this.muted;
     this.watchAudioTrack(nextTrack);
-    const previousTracks = this.localStream.getAudioTracks();
     await Promise.all([...this.peers.values()].map(async (peer) => {
       const sender = peer.getSenders().find((candidate) => candidate.track?.kind === "audio");
       if (sender) await sender.replaceTrack(nextTrack);
@@ -197,9 +208,14 @@ export class MeshCall {
       }
     }));
     this.localStream = nextStream;
-    previousTracks.forEach((track) => track.stop());
+    this.disposeInputGraph(previous);
     this.audioInputDeviceId = deviceId || undefined;
     this.callbacks.onLocalStream?.(nextStream);
+  }
+
+  async setInputVolume(volume: number): Promise<void> {
+    this.inputVolume = Math.min(1, Math.max(0, volume));
+    if (this.inputGain) this.inputGain.gain.value = this.inputVolume;
   }
 
   async toggleScreenShare(): Promise<boolean> {
@@ -250,6 +266,13 @@ export class MeshCall {
     if (this.state) await nodeApi.leaveCall(this.groupId, this.channelId, this.state.call_id).catch(() => undefined);
     this.stopScreenShare();
     this.localStream?.getTracks().forEach((track) => track.stop());
+    this.disposeInputGraph({ raw: this.rawInputStream, source: this.inputSource, gain: this.inputGain, destination: this.inputDestination, stream: this.localStream });
+    void this.inputAudioContext?.close();
+    this.inputAudioContext = null;
+    this.rawInputStream = null;
+    this.inputSource = null;
+    this.inputGain = null;
+    this.inputDestination = null;
     this.localStream = null;
     this.peers.forEach((peer) => peer.close());
     this.peers.clear();
@@ -330,6 +353,28 @@ export class MeshCall {
         this.callbacks.onError?.("o microfone foi desconectado; selecione outro dispositivo na call");
       }
     }, { once: true });
+  }
+
+  private async createProcessedInputStream(rawStream: MediaStream): Promise<MediaStream> {
+    this.rawInputStream = rawStream;
+    if (typeof AudioContext === "undefined") return rawStream;
+    this.inputAudioContext ??= new AudioContext();
+    if (this.inputAudioContext.state === "suspended") await this.inputAudioContext.resume().catch(() => undefined);
+    this.inputSource = this.inputAudioContext.createMediaStreamSource(rawStream);
+    this.inputGain = this.inputAudioContext.createGain();
+    this.inputGain.gain.value = this.inputVolume;
+    this.inputDestination = this.inputAudioContext.createMediaStreamDestination();
+    this.inputSource.connect(this.inputGain);
+    this.inputGain.connect(this.inputDestination);
+    return this.inputDestination.stream;
+  }
+
+  private disposeInputGraph(graph: { raw: MediaStream | null; source: MediaStreamAudioSourceNode | null; gain: GainNode | null; destination: MediaStreamAudioDestinationNode | null; stream: MediaStream | null }) {
+    graph.source?.disconnect();
+    graph.gain?.disconnect();
+    graph.destination?.stream.getTracks().forEach((track) => track.stop());
+    graph.raw?.getTracks().forEach((track) => track.stop());
+    if (graph.stream && graph.stream !== graph.raw) graph.stream.getTracks().forEach((track) => track.stop());
   }
 
   private async renegotiate(peerId: string, peer: RTCPeerConnection, iceRestart = false): Promise<void> {

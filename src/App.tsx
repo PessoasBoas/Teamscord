@@ -3,7 +3,7 @@ import {
   Bell, ChevronDown, CircleHelp, Copy, Hash, Headphones, LogOut, Menu, Mic, MicOff, MonitorUp,
   Plus, Search, Settings, ShieldCheck, Signal, UserPlus, Users, Volume2, Wifi, X,
 } from "lucide-react";
-import { CallStage, type CallStageHandle } from "./components/CallStage";
+import { CallDock, CallStage, type CallStageHandle } from "./components/CallStage";
 import { ChatPanel, EmptyWorkspace } from "./components/Chat";
 import { GroupSettings } from "./components/GroupSettings";
 import { channelIcon, ChannelRow, ChannelSection, MemberRow } from "./components/Navigation";
@@ -15,7 +15,7 @@ import { callKey, memberIsInCall, mergeMessages, normalizeGroup, peerIsOnline, r
 import { checkForUpdate, DISMISSED_UPDATE_STORAGE, type UpdateInfo } from "./lib/update-checker";
 import {
   type AppNotification, type CallSignalEvent, type CallState, type Channel, type ChatMessage, type Group,
-  type GroupMember, isDesktop, nodeApi, type NodeSnapshot, type NetworkStatus, type SearchResult, type UserPreferences,
+  type GroupMember, isDesktop, nodeApi, type NetworkDiagnostics, type NodeSnapshot, type NetworkStatus, type SearchResult, type UserPreferences,
 } from "./lib/tauri";
 
 const STORAGE_GROUP = "teamscord.active-group";
@@ -74,6 +74,8 @@ function App() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [preferences, setPreferences] = useState<UserPreferences>(readPreferences);
   const [availableUpdate, setAvailableUpdate] = useState<UpdateInfo | null>(null);
+  const [networkDiagnostics, setNetworkDiagnostics] = useState<NetworkDiagnostics | null>(null);
+  const [checkingDiagnostics, setCheckingDiagnostics] = useState(false);
   const [newChannelName, setNewChannelName] = useState("");
   const [newChannelKind, setNewChannelKind] = useState<Channel["kind"]>("text");
   const activeSelection = useRef({ groupId: "", channelId: "" });
@@ -301,6 +303,30 @@ function App() {
     void nodeApi.getMediaConfig().then((config) => setMediaConfigText(JSON.stringify(config.ice_servers, null, 2))).catch((reason) => setError(String(reason)));
   }, [modal]);
 
+  async function runNetworkDiagnostics() {
+    if (!isDesktop()) return;
+    setCheckingDiagnostics(true);
+    try { setNetworkDiagnostics(await nodeApi.runNetworkDiagnostics()); }
+    catch (reason) { setError(`verificação P2P falhou: ${String(reason)}`); }
+    finally { setCheckingDiagnostics(false); }
+  }
+
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const result = await nodeApi.runNetworkDiagnostics();
+        if (!cancelled) setNetworkDiagnostics(result);
+      } catch {
+        // A checagem automática não deve interromper o uso do chat; o painel mostra o último resultado válido.
+      }
+    };
+    void check();
+    const interval = window.setInterval(() => void check(), 15_000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, []);
+
   function selectGroup(group: Group) { setActiveGroupId(group.id); setActiveChannelId(selectInitialChannel(group)); setMessages([]); setPopover(null); setContextMenu(null); setError(""); }
   function selectChannel(channel: Channel) { setActiveChannelId(channel.id); setMessages([]); setPopover(null); setContextMenu(null); setFeedback(""); }
   function openModal(next: Modal) { setPopover(null); setContextMenu(null); setModal(next); }
@@ -459,7 +485,7 @@ function App() {
   }
 
   const statusLabel = statusCopy(nodeStatus);
-  const renderCall = visibleCallTarget ? <CallStage ref={callRef} groupId={visibleCallTarget.groupId} channelId={visibleCallTarget.channelId} localPeerId={node.peer_id} signals={callSignals.filter((signal) => { const value = signal.signal as { group_id?: string; channel_id?: string }; return value.group_id === visibleCallTarget.groupId && value.channel_id === visibleCallTarget.channelId; })} sharedState={callStates[callKey(visibleCallTarget.groupId, visibleCallTarget.channelId)] ?? null} muted={muted} deafened={deafened} compact={!callIsVisible} onToggleDeafened={() => setDeafened((value) => !value)} onMutedChange={setMuted} onJoined={onCallJoined} onLeft={onCallLeft} onState={(state) => setCallStates((items) => ({ ...items, [callKey(state.group_id, state.channel_id)]: state }))} onError={setError} /> : null;
+  const renderCall = visibleCallTarget ? <CallStage ref={callRef} groupId={visibleCallTarget.groupId} channelId={visibleCallTarget.channelId} localPeerId={node.peer_id} displayName={preferences.display_name} signals={callSignals.filter((signal) => { const value = signal.signal as { group_id?: string; channel_id?: string }; return value.group_id === visibleCallTarget.groupId && value.channel_id === visibleCallTarget.channelId; })} sharedState={callStates[callKey(visibleCallTarget.groupId, visibleCallTarget.channelId)] ?? null} muted={muted} deafened={deafened} compact={false} onToggleDeafened={() => setDeafened((value) => !value)} onMutedChange={setMuted} onJoined={onCallJoined} onLeft={onCallLeft} onState={(state) => setCallStates((items) => ({ ...items, [callKey(state.group_id, state.channel_id)]: state }))} onError={setError} /> : null;
 
   return <div className="app-shell" tabIndex={-1} onClick={() => contextMenu && setContextMenu(null)} onKeyDownCapture={(event) => {
     if (event.key === "Escape" || event.key === "Esc") {
@@ -494,7 +520,10 @@ function App() {
           {!loadingMembers && !members.length && <div className="sidebar-loading">nenhum membro sincronizado</div>}
         </> : <div className="sidebar-empty"><Users size={22} /><strong>nenhum grupo ainda</strong><span>crie um servidor ou entre por convite</span><button onClick={() => openModal("create")}>criar servidor</button><button className="secondary-link" onClick={() => openModal("join")}>usar convite</button></div>}
       </div>
-      <div className="user-panel"><span className="avatar avatar-purple">{preferences.display_name.slice(0, 2).toUpperCase()}<span className={`presence ${node.is_running ? "online" : "idle"}`} /></span><div className="user-copy"><strong>{preferences.display_name}</strong><small>{callTarget ? "em call" : statusLabel}</small></div><button className={`icon-button ${muted ? "is-on" : ""}`} onClick={() => void toggleLocalMute()} title={muted ? "Ativar microfone" : "Desativar microfone"} aria-label={muted ? "Ativar microfone" : "Desativar microfone"}>{muted ? <MicOff size={17} /> : <Mic size={17} />}</button><button className={`icon-button ${deafened ? "is-on" : ""}`} onClick={() => setDeafened((value) => !value)} title={deafened ? "Ativar áudio" : "Silenciar participantes"} aria-label={deafened ? "Ativar áudio" : "Silenciar participantes"}>{deafened ? <Volume2 size={17} /> : <Headphones size={17} />}</button><button className="icon-button" title="Configurações do usuário" aria-label="Configurações do usuário" onClick={() => openModal("user-settings")}><Settings size={17} /></button></div>
+      <div className={`user-panel ${callTarget ? "has-call" : ""}`}>
+        {callTarget && <CallDock state={callStates[callKey(callTarget.groupId, callTarget.channelId)] ?? null} channelName={groups.find((group) => group.id === callTarget.groupId)?.channels.find((channel) => channel.id === callTarget.channelId)?.name ?? "call"} muted={muted} deafened={deafened} onToggleMute={() => void toggleLocalMute()} onToggleDeafened={() => setDeafened((value) => !value)} onLeave={() => void callRef.current?.leave()} />}
+        <div className="user-profile-controls"><span className="avatar avatar-purple">{preferences.display_name.slice(0, 2).toUpperCase()}<span className={`presence ${node.is_running ? "online" : "idle"}`} /></span><div className="user-copy"><strong>{preferences.display_name}</strong><small>{callTarget ? "em call" : statusLabel}</small></div><button className={`icon-button ${muted ? "is-on" : ""}`} onClick={() => void toggleLocalMute()} title={muted ? "Ativar microfone" : "Desativar microfone"} aria-label={muted ? "Ativar microfone" : "Desativar microfone"}>{muted ? <MicOff size={17} /> : <Mic size={17} />}</button><button className={`icon-button ${deafened ? "is-on" : ""}`} onClick={() => setDeafened((value) => !value)} title={deafened ? "Ativar áudio" : "Silenciar participantes"} aria-label={deafened ? "Ativar áudio" : "Silenciar participantes"}>{deafened ? <Volume2 size={17} /> : <Headphones size={17} />}</button><button className="icon-button" title="Configurações do usuário" aria-label="Configurações do usuário" onClick={() => openModal("user-settings")}><Settings size={17} /></button></div>
+      </div>
     </aside>
 
     <main className="main-panel">
@@ -506,7 +535,7 @@ function App() {
       </header>
 
       {!activeGroup || !activeChannel ? <EmptyWorkspace onCreate={() => openModal("create")} onJoin={() => openModal("join")} /> : <div className={`workspace-layer ${activeChannel.kind === "voice" ? "voice-layout" : "text-layout"}`}>
-        {visibleCallTarget && <div className={`call-stage-host ${callIsVisible ? "full" : "compact"}`}>{renderCall}</div>}
+        {visibleCallTarget && <div className={`call-stage-host ${callIsVisible ? "full" : "background-call"}`}>{renderCall}</div>}
         <ChatPanel channel={activeChannel} messages={messages} loading={loadingMessages} draft={draft} busy={busy} onDraft={setDraft} onSubmit={handleSubmit} onMessageContextMenu={(event, message) => openContextMenu(event, { kind: "message", groupId: activeGroup.id, channelId: activeChannel.id, messageId: message.id })} />
       </div>}
       <footer className="status-bar"><div className="status-item"><Wifi size={14} /><span>{statusLabel}</span><span className={`status-dot ${nodeStatus === "offline" ? "status-dot-offline" : ""}`} /></div><div className="status-item muted-status">{node.connected_peers} peers próximos <span>·</span> {syncLabel}</div><button onClick={() => openModal("network")} className="network-link">identidade do node <span>{node.peer_id ? `${node.peer_id.slice(0, 12)}…` : "indisponível"}</span></button></footer>
@@ -535,7 +564,7 @@ function App() {
         <button role="menuitem" onClick={() => openContextGroupSettings(contextMenu.groupId)}><ShieldCheck size={15} /> Gerenciar membro</button>
       </>}
     </div>}
-    {modal === "network" && <NetworkModal node={node} peerAddress={peerAddress} setPeerAddress={setPeerAddress} connectPeer={connectPeer} relayAddress={relayAddress} setRelayAddress={setRelayAddress} addRelay={addRelay} bootstrapAddress={bootstrapAddress} setBootstrapAddress={setBootstrapAddress} addBootstrap={addBootstrap} mediaConfigText={mediaConfigText} setMediaConfigText={setMediaConfigText} saveMediaConfig={saveMediaConfig} copied={copied} copyPeerId={() => copyText(node.peer_id, "peer id copiado")} onClose={() => setModal(null)} />}
+    {modal === "network" && <NetworkModal node={node} diagnostics={networkDiagnostics} checkingDiagnostics={checkingDiagnostics} runDiagnostics={() => void runNetworkDiagnostics()} peerAddress={peerAddress} setPeerAddress={setPeerAddress} connectPeer={connectPeer} relayAddress={relayAddress} setRelayAddress={setRelayAddress} addRelay={addRelay} bootstrapAddress={bootstrapAddress} setBootstrapAddress={setBootstrapAddress} addBootstrap={addBootstrap} mediaConfigText={mediaConfigText} setMediaConfigText={setMediaConfigText} saveMediaConfig={saveMediaConfig} copied={copied} copyPeerId={() => copyText(node.peer_id, "peer id copiado")} onClose={() => setModal(null)} />}
     {modal === "create" && <div className="modal-backdrop" onClick={() => setModal(null)}><section className="network-modal form-modal" onClick={(event) => event.stopPropagation()}><ModalHeader eyebrow="NOVO SERVIDOR" title="Criar servidor" onClose={() => setModal(null)} />{generatedInvite ? <><p className="modal-note modal-intro">Servidor criado. Compartilhe este convite com seus amigos; ele expira em 30 dias.</p><div className="invite-box"><code>{generatedInvite}</code><button className="connect-button" onClick={() => void copyText(generatedInvite, "convite copiado")}><Copy size={15} /> {copied ? "copiado" : "copiar"}</button></div><button className="primary-button modal-primary" onClick={() => setModal(null)}>concluir</button></> : <form className="modal-form" onSubmit={handleCreateGroup}><label>nome do servidor</label><input autoFocus value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="ex.: Amigos do bairro" maxLength={80} /><button className="primary-button modal-primary" disabled={busy || !groupName.trim()}>{busy ? "criando…" : "criar servidor"}</button></form>}</section></div>}
     {modal === "join" && <div className="modal-backdrop" onClick={() => setModal(null)}><section className="network-modal form-modal" onClick={(event) => event.stopPropagation()}><ModalHeader eyebrow="ENTRAR EM SERVIDOR" title="Usar convite" onClose={() => setModal(null)} /><form className="modal-form" onSubmit={handleJoinGroup}><label>convite assinado</label><textarea autoFocus value={inviteText} onChange={(event) => setInviteText(event.target.value)} placeholder="cole o convite recebido aqui" rows={5} /><button className="primary-button modal-primary" disabled={busy || !inviteText.trim()}>{busy ? "validando…" : "entrar no servidor"}</button></form><p className="modal-note">O convite é validado localmente e a chave do servidor fica protegida no armazenamento seguro do sistema.</p></section></div>}
     {modal === "create-channel" && activeGroup && <div className="modal-backdrop" onClick={() => setModal(null)}><section className="network-modal form-modal" onClick={(event) => event.stopPropagation()}><ModalHeader eyebrow={activeGroup.name.toUpperCase()} title="Criar canal" onClose={() => setModal(null)} /><form className="modal-form" onSubmit={createChannel}><label>nome do canal</label><input autoFocus value={newChannelName} onChange={(event) => setNewChannelName(event.target.value)} placeholder="ex.: jogos" maxLength={40} /><label>tipo</label><div className="preference-options"><button type="button" className={newChannelKind === "text" ? "selected" : ""} onClick={() => setNewChannelKind("text")}><Hash size={14} /> texto</button><button type="button" className={newChannelKind === "voice" ? "selected" : ""} onClick={() => setNewChannelKind("voice")}><Volume2 size={14} /> voz + chat + tela</button></div><button className="primary-button modal-primary" disabled={!newChannelName.trim()}>criar canal</button></form></section></div>}

@@ -47,6 +47,8 @@ export type NodeSnapshot = {
   relay_addresses: string[];
   bootstrap_addresses: string[];
 };
+export type NetworkDiagnosticCheck = { name: string; status: "ok" | "error" | "waiting" | "info"; detail: string };
+export type NetworkDiagnostics = { status: "healthy" | "waiting" | "offline"; summary: string; checks: NetworkDiagnosticCheck[]; connected_peers: number; checked_at: number };
 
 export type NetworkStatus = "starting" | "online" | "offline" | "syncing" | "preview" | "reconnecting";
 export type SyncStatus = { group_id: string; state: "idle" | "syncing" | "synced" | "error"; updated_at: number; error?: string | null };
@@ -116,6 +118,7 @@ export const isDesktop = () => typeof window !== "undefined" && "__TAURI_INTERNA
 export const nodeApi = {
   startNode: () => invoke<NodeSnapshot>("start_node"),
   getNodeSnapshot: () => invoke<NodeSnapshot>("get_node_snapshot"),
+  runNetworkDiagnostics: () => invoke<NetworkDiagnostics>("run_network_diagnostics"),
   getNetworkConfig: () => invoke<NetworkConfig>("get_network_config"),
   setNetworkConfig: (relayAddresses: string[], bootstrapAddresses: string[] = []) => invoke<NetworkConfig>("set_network_config", { relayAddresses, bootstrapAddresses }),
   getMediaConfig: () => invoke<MediaConfig>("get_media_config"),
@@ -145,7 +148,7 @@ export const nodeApi = {
   searchMessages: (groupId: string, query: string, limit = 50) => invoke<SearchResult[]>("search_messages", { groupId, query, limit }),
   sendMessage: (groupId: string, channelId: string, content: string, authorName = "Você") => invoke<ChatMessage>("send_message", { groupId, channelId, authorName, content }),
   deleteMessage: (groupId: string, channelId: string, messageId: string) => invoke<void>("delete_message", { groupId, channelId, messageId }),
-  joinCall: (groupId: string, channelId: string, callId?: string) => invoke<CallState>("join_call", { groupId, channelId, callId }),
+  joinCall: (groupId: string, channelId: string, callId?: string, displayName?: string) => invoke<CallState>("join_call", { groupId, channelId, callId, displayName }),
   leaveCall: (groupId: string, channelId: string, callId: string) => invoke<void>("leave_call", { groupId, channelId, callId }),
   sendCallSignal: (groupId: string, channelId: string, callId: string, toPeerId: string | null, kind: string, payload: Record<string, unknown>) => invoke<void>("send_call_signal", { groupId, channelId, callId, toPeerId, kind, payload }),
   requestCallMute: (groupId: string, channelId: string, callId: string, peerId: string, muted: boolean) => invoke<void>("request_call_mute", { groupId, channelId, callId, peerId, muted }),

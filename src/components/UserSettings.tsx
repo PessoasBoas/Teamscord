@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Palette, UserRound, Volume2, X } from "lucide-react";
 import type { UserPreferences } from "../lib/tauri";
+import { AudioSettings } from "./AudioSettings";
 
 type UserSettingsProps = {
   preferences: UserPreferences;
@@ -40,7 +41,7 @@ export function UserSettings({ preferences, onChange, onClose }: UserSettingsPro
             <div className="preference-section"><h3>Densidade</h3><p>Ajuste o tamanho dos canais e mensagens.</p><div className="preference-options">{(["compact", "comfortable", "large"] as const).map((scale) => <button key={scale} className={preferences.scale === scale ? "selected" : ""} onClick={() => update("scale", scale)}>{scale === "compact" ? "Compacta" : scale === "comfortable" ? "Confortável" : "Grande"}</button>)}</div></div>
           </div>}
           {tab === "profile" && <div className="preference-form"><div className="preference-section"><h3>Nome exibido</h3><p>Esse nome será usado nas mensagens e nas calls deste node.</p><div className="profile-edit"><span className="avatar avatar-purple">{(draftName || "VC").slice(0, 2).toUpperCase()}</span><input value={draftName} maxLength={40} onChange={(event) => setDraftName(event.target.value)} onBlur={saveName} onKeyDown={(event) => { if (event.key === "Enter") saveName(); }} /><button className="connect-button" onClick={saveName}>salvar</button></div></div><div className="settings-hero"><UserRound size={24} /><div><strong>Identidade P2P protegida</strong><span>A identidade criptográfica do node não é alterada ao trocar o nome.</span></div></div></div>}
-          {tab === "audio" && <div className="preference-form"><div className="preference-section"><h3>Dispositivos</h3><p>Os dispositivos são escolhidos dentro da call quando o WebView2 libera acesso ao microfone.</p></div><div className="settings-hero"><Volume2 size={24} /><div><strong>WebRTC P2P</strong><span>Áudio usa DTLS-SRTP e não é salvo no banco local.</span></div></div></div>}
+          {tab === "audio" && <AudioSettings />}
         </div>
       </div>
     </section>

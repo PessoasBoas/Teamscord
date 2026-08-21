@@ -1,6 +1,6 @@
 # Teamscord
 
-Teamscord 0.2.1 é um chat de grupos privados com um node local por instalação. Mensagens, eventos administrativos e épocas de chave são sincronizados entre peers; áudio e compartilhamento de tela usam uma malha WebRTC P2P opcional.
+Teamscord 0.2.2 é um chat de grupos privados com um node local por instalação. Mensagens, eventos administrativos e épocas de chave são sincronizados entre peers; áudio e compartilhamento de tela usam uma malha WebRTC P2P opcional.
 
 ## Stack
 
@@ -34,7 +34,7 @@ npm run release
 
 O comando gera o `.exe` em `src-tauri/target/release/bundle/nsis` e um arquivo `.sha256`. O Windows pode mostrar um aviso do SmartScreen até o produto possuir certificado de assinatura. O app consulta periodicamente a release estável de `PessoasBoas/Teamscord`; quando encontra uma versão maior, mostra um popup com link para o instalador NSIS e as notas da versão. A instalação continua manual e confirmada pelo usuário: não há atualização silenciosa nem auto-update embutido nesta versão.
 
-Ao publicar uma versão, crie uma GitHub Release com uma tag semver (por exemplo `v0.2.1`) e anexe o `.exe` x64 gerado junto com o `.sha256`. O verificador só aceita releases estáveis, URLs do repositório oficial e o instalador cujo nome termina em `_x64-setup.exe`.
+Ao publicar uma versão, crie uma GitHub Release com uma tag semver (por exemplo `v0.2.2`) e anexe o `.exe` x64 gerado junto com o `.sha256`. O verificador só aceita releases estáveis, URLs do repositório oficial e o instalador cujo nome termina em `_x64-setup.exe`.
 
 ## Grupos e rede
 

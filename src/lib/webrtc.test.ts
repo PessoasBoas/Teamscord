@@ -172,10 +172,11 @@ describe("MeshCall", () => {
 
   it("inicia microfone, alterna mute, troca dispositivo e fecha a call", async () => {
     const onLocalStream = vi.fn();
-    const call = new MeshCall("group-1", "group-1:lounge", "local", { onLocalStream });
+    const call = new MeshCall("group-1", "group-1:lounge", "local", { onLocalStream }, undefined, false, 0.75, "Sheldon");
 
     await call.start();
     expect(navigatorStub.mediaDevices.getUserMedia).toHaveBeenCalledWith({ audio: true, video: false });
+    expect(vi.mocked(nodeApi.joinCall)).toHaveBeenCalledWith("group-1", "group-1:lounge", undefined, "Sheldon");
     expect(onLocalStream).toHaveBeenCalledWith(expect.any(FakeMediaStream));
     expect(microphone.enabled).toBe(true);
 

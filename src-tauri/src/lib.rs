@@ -77,6 +77,22 @@ pub struct NodeSnapshot {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkDiagnosticCheck {
+    pub name: String,
+    pub status: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkDiagnostics {
+    pub status: String,
+    pub summary: String,
+    pub checks: Vec<NetworkDiagnosticCheck>,
+    pub connected_peers: usize,
+    pub checked_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub id: String,
     pub group_id: String,
@@ -301,6 +317,113 @@ fn get_node_snapshot(state: State<'_, NodeState>) -> Result<NodeSnapshot, String
         .lock()
         .map(|snapshot| snapshot.clone())
         .map_err(|_| "estado do node indisponível".into())
+}
+
+#[tauri::command]
+fn run_network_diagnostics(state: State<'_, NodeState>) -> Result<NetworkDiagnostics, String> {
+    let snapshot = state
+        .snapshot
+        .lock()
+        .map_err(|_| "estado do node indisponível")?
+        .clone();
+    let mut checks = vec![
+        NetworkDiagnosticCheck {
+            name: "node".into(),
+            status: if snapshot.is_running { "ok" } else { "error" }.into(),
+            detail: if snapshot.is_running {
+                "node iniciado e respondendo"
+            } else {
+                "node ainda não foi iniciado"
+            }
+            .into(),
+        },
+        NetworkDiagnosticCheck {
+            name: "listener".into(),
+            status: if !snapshot.listen_addresses.is_empty() {
+                "ok"
+            } else {
+                "waiting"
+            }
+            .into(),
+            detail: if snapshot.listen_addresses.is_empty() {
+                "aguardando endereço de escuta".into()
+            } else {
+                format!(
+                    "{} endereço(s) anunciado(s)",
+                    snapshot.listen_addresses.len()
+                )
+            },
+        },
+        NetworkDiagnosticCheck {
+            name: "peers".into(),
+            status: if snapshot.connected_peers > 0 {
+                "ok"
+            } else {
+                "waiting"
+            }
+            .into(),
+            detail: if snapshot.connected_peers > 0 {
+                format!(
+                    "{} peer(s) conectado(s); Ping libp2p ativo",
+                    snapshot.connected_peers
+                )
+            } else {
+                "nenhum peer conectado — use um endereço ou bootstrap".into()
+            },
+        },
+    ];
+    let recovery_configured =
+        !snapshot.bootstrap_addresses.is_empty() || !snapshot.relay_addresses.is_empty();
+    checks.push(NetworkDiagnosticCheck {
+        name: "recovery".into(),
+        status: if recovery_configured { "ok" } else { "info" }.into(),
+        detail: if recovery_configured {
+            format!(
+                "{} bootstrap(s) e {} relay(s) configurado(s)",
+                snapshot.bootstrap_addresses.len(),
+                snapshot.relay_addresses.len()
+            )
+        } else {
+            "sem bootstrap/relay; conexão direta ainda funciona na LAN".into()
+        },
+    });
+    if snapshot.is_running {
+        let sync_probe = state
+            .command_tx
+            .lock()
+            .map_err(|_| "controle do node indisponível")?
+            .as_ref()
+            .map(|sender| sender.send(NodeCommand::RequestSync).is_ok())
+            .unwrap_or(false);
+        checks.push(NetworkDiagnosticCheck {
+            name: "sync-probe".into(),
+            status: if sync_probe { "ok" } else { "error" }.into(),
+            detail: if sync_probe {
+                "sonda de sincronização enviada aos peers".into()
+            } else {
+                "node não aceitou a sonda de sincronização".into()
+            },
+        });
+    }
+    let status = if !snapshot.is_running {
+        "offline"
+    } else if snapshot.connected_peers > 0 {
+        "healthy"
+    } else {
+        "waiting"
+    };
+    let summary = match status {
+        "healthy" => "node saudável e conectado a peers",
+        "waiting" => "node ativo, aguardando conexão com outro node",
+        _ => "node offline",
+    };
+    Ok(NetworkDiagnostics {
+        status: status.into(),
+        summary: summary.into(),
+        checks,
+        connected_peers: snapshot.connected_peers,
+        checked_at: now_millis(),
+    })
 }
 
 #[tauri::command]
@@ -1063,9 +1186,14 @@ fn join_call(
     group_id: String,
     channel_id: String,
     call_id: Option<String>,
+    display_name: Option<String>,
     state: State<'_, NodeState>,
 ) -> Result<CallState, String> {
     let member = local_member(&state, &group_id)?;
+    let call_display_name = match display_name {
+        Some(value) => validate_display_name(value)?,
+        None => member.display_name.clone(),
+    };
     if member.status != "active"
         || timeout_is_active(member.timeout_until, now_seconds())
         || !has_permission(&member.role, &Permission::JoinVoice)
@@ -1093,7 +1221,7 @@ fn join_call(
         &call_id,
         None,
         "join",
-        serde_json::json!({ "display_name": member.display_name }),
+        serde_json::json!({ "display_name": call_display_name.clone() }),
     )?;
     let call_state = {
         let mut states = state
@@ -1116,7 +1244,7 @@ fn join_call(
             }
             current.participants.push(CallParticipant {
                 peer_id: member.peer_id.clone(),
-                display_name: member.display_name.clone(),
+                display_name: call_display_name.clone(),
                 role: member.role.clone(),
                 muted: false,
                 sharing_screen: false,
@@ -4243,6 +4371,14 @@ fn validate_group_name(name: String) -> Result<String, String> {
     Ok(name)
 }
 
+fn validate_display_name(name: String) -> Result<String, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 40 {
+        return Err("nome exibido deve ter entre 1 e 40 caracteres".into());
+    }
+    Ok(name)
+}
+
 fn validate_channel_name(name: String) -> Result<String, String> {
     let name = name.trim().replace(' ', "-").to_lowercase();
     if name.is_empty()
@@ -4377,6 +4513,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_node,
             get_node_snapshot,
+            run_network_diagnostics,
             get_network_config,
             set_network_config,
             get_media_config,

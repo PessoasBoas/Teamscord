@@ -266,3 +266,85 @@ html[data-theme="light"] .context-menu button:hover { color: #1e2340; background
 .danger-button { display: inline-flex; align-items: center; gap: 7px; padding: 9px 11px; margin-top: 18px; border: 1px solid #743f50; border-radius: 8px; color: #ffb2bb; background: #351f2c; font-size: 10px; font-weight: 800; }
 .danger-button:hover { border-color: #a4525e; color: #fff; background: #562738; }
 .role-badge { padding: 5px 7px; border: 1px solid #4f47b8; border-radius: 6px; color: #c5c0ff; background: #292755; font-family: 'DM Mono', monospace; font-size: 9px; text-transform: uppercase; }
+
+/* Release polish: content remains readable at desktop sizes and never hides behind a dock/modal. */
+body { font-size: 14px; }
+.message-row, .message-copy { min-width: 0; max-width: 100%; }
+.message-copy { flex: 1 1 auto; }
+.message-copy p { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; font-size: 14px; line-height: 1.58; }
+.message-meta strong { font-size: 13px; }
+.composer input { font-size: 13px; }
+.user-panel { height: auto; min-height: 67px; flex-direction: column; align-items: stretch; padding-top: 7px; padding-bottom: 7px; }
+.user-profile-controls { display: flex; align-items: center; gap: 8px; min-height: 52px; }
+.user-panel.has-call { gap: 5px; padding-top: 7px; padding-bottom: 7px; }
+.user-panel.has-call .user-profile-controls { min-height: 34px; }
+.user-panel.has-call .user-copy small { color: #8ed9c5; }
+.call-dock { width: 100%; min-height: 38px; gap: 7px; padding: 4px 6px; border-color: #334168; border-radius: 10px; background: #151d37; box-shadow: none; backdrop-filter: none; }
+.call-dock-signal { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #ff9aa5; box-shadow: 0 0 0 3px #ff9aa51c; }
+.call-dock-signal.online { background: #61dfbe; box-shadow: 0 0 0 3px #61dfbe1c; }
+.call-dock-status { min-width: 0; flex: 1; gap: 0; }
+.call-dock-status strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+.call-dock-status small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+.call-dock-participants { margin-left: 0; flex: 0 0 auto; }
+.call-dock-participants span { width: 22px; height: 22px; border-radius: 7px; font-size: 7px; }
+.call-dock-controls { flex: 0 0 auto; }
+.call-dock .control-button { width: 26px; height: 26px; }
+.workspace-layer .call-stage-host.background-call { position: absolute; z-index: -1; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+.workspace-layer .call-stage-host.background-call .real-call-stage { width: 1px; height: 1px; }
+.settings-modal, .network-modal { min-height: 0; }
+.settings-modal { display: flex; flex-direction: column; height: min(720px, calc(100vh - 32px)); }
+.settings-layout { min-height: 0; flex: 1; }
+.settings-content { min-height: 0; }
+.network-modal { max-height: calc(100vh - 32px); overflow: auto; }
+.network-modal .modal-header { position: sticky; top: -25px; z-index: 1; padding-top: 25px; margin: -25px -25px 23px; padding-left: 25px; padding-right: 25px; background: #171e38; }
+
+.audio-device-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.audio-field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.audio-field > span, .volume-control > span { display: flex; align-items: center; gap: 6px; color: #aab4d2; font-size: 11px; }
+.audio-field select { min-width: 0; padding: 10px; border: 1px solid #35416c; border-radius: 8px; outline: 0; color: #e8eaff; background: #11172c; font-size: 11px; }
+.audio-field select:focus { border-color: #8276ff; }
+.audio-field option { color: #1e2340; background: #eef0ff; }
+.audio-volume-section { display: flex; flex-direction: column; gap: 15px; }
+.volume-control { display: grid; grid-template-columns: 145px minmax(0, 1fr); align-items: center; gap: 16px; }
+.volume-control strong { margin-left: auto; color: #d8d8ff; font-family: 'DM Mono', monospace; font-size: 10px; }
+.volume-control input { width: 100%; accent-color: #7167eb; }
+.audio-test-panel { display: flex; flex-direction: column; gap: 12px; padding: 15px; border: 1px solid #2e3a60; border-radius: 12px; background: linear-gradient(145deg, #1b2647, #151c35); }
+.audio-test-panel h3 { margin: 6px 0 4px; color: #eef0ff; font-size: 15px; }
+.audio-test-panel p { margin: 0; color: #8c97b9; font-size: 11px; line-height: 1.5; }
+.audio-test-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.audio-test-actions .icon-button { width: 31px; height: 31px; margin-left: auto; }
+.audio-meter { height: 7px; overflow: hidden; border-radius: 99px; background: #10162a; }
+.audio-meter i { display: block; width: 100%; height: 100%; transform-origin: left; border-radius: inherit; background: linear-gradient(90deg, #55cfae, #8b7dff); transition: transform .08s linear; }
+.audio-test-status { display: flex; align-items: center; gap: 6px; color: #75dfc1; font-size: 10px; }
+.audio-test-status.error { color: #ffabb5; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.diagnostic-panel { display: flex; flex-direction: column; gap: 9px; margin-top: 10px; padding: 13px; border: 1px solid #35416c; border-radius: 12px; background: #11172c; }
+.diagnostic-panel.diagnostic-healthy { border-color: #2f665b; }
+.diagnostic-panel.diagnostic-offline { border-color: #69404e; }
+.diagnostic-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.diagnostic-heading > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.diagnostic-heading strong { color: #e9ebff; font-size: 11px; }
+.diagnostic-check { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; border-top: 1px solid #242e4e; }
+.diagnostic-check > span { display: grid; place-items: center; width: 19px; height: 19px; flex: 0 0 auto; border-radius: 6px; color: #75dfc1; background: #1b4c49; }
+.diagnostic-check-error > span, .diagnostic-check-waiting > span { color: #ffabb5; background: #4e2938; }
+.diagnostic-check div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.diagnostic-check strong { color: #cfd5eb; font-size: 10px; }
+.diagnostic-check small { color: #8591b3; font-size: 9px; line-height: 1.4; }
+.diagnostic-footnote { display: flex; align-items: center; gap: 5px; color: #6f7b9f; font-family: 'DM Mono', monospace; font-size: 8px; }
+
+html[data-scale="large"] .message-copy p { font-size: 15px; }
+html[data-scale="large"] .channel-row, html[data-scale="large"] .member { font-size: 14px; }
+html[data-scale="large"] .user-copy strong { font-size: 12px; }
+html[data-theme="light"] .network-modal .modal-header { background: #fff; }
+html[data-theme="light"] .audio-field select { border-color: #cfd7ea; color: #2d3558; background: #f6f8fd; }
+html[data-theme="light"] .audio-test-panel { border-color: #cfd7ea; background: #f1f5fd; }
+html[data-theme="light"] .audio-test-panel h3 { color: #1e2340; }
+html[data-theme="light"] .audio-test-panel p, html[data-theme="light"] .audio-field > span, html[data-theme="light"] .volume-control > span { color: #526079; }
+html[data-theme="light"] .call-dock { border-color: #cfd7ea; background: #fff; }
+html[data-theme="light"] .diagnostic-panel { border-color: #cfd7ea; background: #f6f8fd; }
+html[data-theme="light"] .diagnostic-heading strong, html[data-theme="light"] .diagnostic-check strong { color: #1e2340; }
+html[data-theme="light"] .diagnostic-check { border-color: #dfe5f0; }
+html[data-theme="light"] .diagnostic-check small, html[data-theme="light"] .diagnostic-footnote { color: #687493; }
+@media (max-width: 700px) { .settings-modal { height: calc(100vh - 32px); } .audio-device-grid { grid-template-columns: 1fr; } .volume-control { grid-template-columns: 1fr; gap: 7px; } }
