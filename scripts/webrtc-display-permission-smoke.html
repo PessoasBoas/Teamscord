@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Teamscord native display capture smoke</title>
+<body>running</body>
+<script>
+  (() => {
+    const result = { ok: false, checks: [], error: null };
+    const check = (name, value) => {
+      result.checks.push({ name, ok: Boolean(value) });
+      if (!value) throw new Error(`${name} falhou`);
+    };
+    const finish = async () => {
+      document.body.textContent = `TEAMSCORD_NATIVE_DISPLAY_RESULT:${JSON.stringify(result)}`;
+      try { await fetch("/result", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(result), keepalive: true }); } catch { /* server timeout is handled by the runner */ }
+    };
+    void (async () => {
+      try {
+        if (!navigator.mediaDevices?.getDisplayMedia) throw new Error("getDisplayMedia indisponível");
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        check("native getDisplayMedia", stream.getVideoTracks().length > 0);
+        check("native screen track", stream.getVideoTracks()[0]?.readyState === "live");
+        stream.getTracks().forEach((track) => track.stop());
+        check("native stop", stream.getTracks().every((track) => track.readyState === "ended"));
+        result.ok = result.checks.every((item) => item.ok);
+      } catch (error) {
+        result.error = String(error && error.message ? error.message : error);
+      } finally { await finish(); }
+    })();
+  })();
+</script>

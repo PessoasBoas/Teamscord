@@ -1,0 +1,14 @@
+services:
+  coturn:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "5349:5349/tcp"
+      - "5349:5349/udp"
+      - "49152-49252:49152-49252/udp"
+    volumes:
+      - ./certs:/etc/coturn/certs:ro

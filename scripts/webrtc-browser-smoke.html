@@ -1,0 +1,129 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Teamscord WebRTC smoke</title>
+<body>running</body>
+<script>
+  (() => {
+    const result = { ok: false, checks: [], error: null };
+    const finish = async () => {
+      document.body.textContent = `TEAMSCORD_BROWSER_RESULT:${JSON.stringify(result)}`;
+      try {
+        await fetch("/result", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(result), keepalive: true });
+      } catch (error) {
+        document.body.textContent += `\nresult-post-error:${String(error)}`;
+      }
+    };
+    const check = (name, value) => {
+      result.checks.push({ name, ok: Boolean(value) });
+      if (!value) throw new Error(`${name} falhou`);
+    };
+    const waitFor = (predicate, timeout = 15000) => new Promise((resolve, reject) => {
+      const started = performance.now();
+      const poll = () => {
+        if (predicate()) return resolve();
+        if (performance.now() - started >= timeout) return reject(new Error("tempo esgotado aguardando conexão WebRTC"));
+        setTimeout(poll, 50);
+      };
+      poll();
+    });
+    const connect = async () => {
+      const nodeStreams = await Promise.all(Array.from({ length: 4 }, () => navigator.mediaDevices.getUserMedia({ audio: true, video: false })));
+      check("getUserMedia", nodeStreams.every((stream) => stream.getAudioTracks().length === 1));
+
+      const receivedAudio = [0, 0, 0, 0];
+      const receivedVideo = [0, 0, 0, 0];
+      const pairs = [];
+      const addCandidate = (peer, queue, candidate) => {
+        if (!candidate) return;
+        if (peer.remoteDescription) void peer.addIceCandidate(candidate);
+        else queue.push(candidate);
+      };
+      const flushCandidates = async (peer, queue) => {
+        await Promise.all(queue.splice(0).map((candidate) => peer.addIceCandidate(candidate)));
+      };
+      const createPair = (leftIndex, rightIndex) => {
+        const pair = {
+          left: new RTCPeerConnection({ iceServers: [] }),
+          right: new RTCPeerConnection({ iceServers: [] }),
+          leftToRight: [],
+          rightToLeft: [],
+          leftIndex,
+          rightIndex,
+          screenSenders: [],
+        };
+        pair.left.onicecandidate = (event) => addCandidate(pair.right, pair.leftToRight, event.candidate);
+        pair.right.onicecandidate = (event) => addCandidate(pair.left, pair.rightToLeft, event.candidate);
+        pair.left.ontrack = (event) => { if (event.track.kind === "audio") receivedAudio[leftIndex] += 1; else if (event.track.kind === "video") receivedVideo[leftIndex] += 1; };
+        pair.right.ontrack = (event) => { if (event.track.kind === "audio") receivedAudio[rightIndex] += 1; else if (event.track.kind === "video") receivedVideo[rightIndex] += 1; };
+        nodeStreams[leftIndex].getTracks().forEach((track) => pair.left.addTrack(track, nodeStreams[leftIndex]));
+        nodeStreams[rightIndex].getTracks().forEach((track) => pair.right.addTrack(track, nodeStreams[rightIndex]));
+        return pair;
+      };
+      const negotiate = async (pair) => {
+        const offer = await pair.left.createOffer();
+        await pair.left.setLocalDescription(offer);
+        await pair.right.setRemoteDescription(pair.left.localDescription);
+        await flushCandidates(pair.right, pair.leftToRight);
+        const answer = await pair.right.createAnswer();
+        await pair.right.setLocalDescription(answer);
+        await pair.left.setRemoteDescription(pair.right.localDescription);
+        await flushCandidates(pair.left, pair.rightToLeft);
+      };
+
+      for (let leftIndex = 0; leftIndex < 4; leftIndex += 1) {
+        for (let rightIndex = leftIndex + 1; rightIndex < 4; rightIndex += 1) {
+          const pair = createPair(leftIndex, rightIndex);
+          pairs.push(pair);
+          await negotiate(pair);
+        }
+      }
+      await waitFor(() => pairs.every((pair) => pair.left.connectionState === "connected" && pair.right.connectionState === "connected"));
+      check("offer-answer", pairs.every((pair) => pair.left.localDescription?.type === "offer" && pair.right.localDescription?.type === "answer"));
+      check("ICE/connection", pairs.every((pair) => pair.left.connectionState === "connected" && pair.right.connectionState === "connected"));
+      await waitFor(() => receivedAudio.every((count) => count >= 3));
+      check("4-node audio mesh", receivedAudio.every((count) => count >= 3));
+
+      const canvas = document.createElement("canvas");
+      canvas.width = 320;
+      canvas.height = 180;
+      const context = canvas.getContext("2d");
+      if (!context || !canvas.captureStream) throw new Error("captura de canvas não está disponível no Edge");
+      context.fillStyle = "#3b82f6";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      const canvasStream = canvas.captureStream(5);
+      const screenAudio = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const fakeDisplayStream = new MediaStream([...canvasStream.getVideoTracks(), ...screenAudio.getAudioTracks()]);
+      const originalGetDisplayMedia = navigator.mediaDevices.getDisplayMedia;
+      navigator.mediaDevices.getDisplayMedia = async () => fakeDisplayStream;
+      const captured = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      check("getDisplayMedia", captured.getVideoTracks().length === 1 && captured.getAudioTracks().length === 1);
+
+      for (const pair of pairs.filter((candidate) => candidate.leftIndex === 0)) {
+        pair.screenSenders = captured.getTracks().map((track) => pair.left.addTrack(track, captured));
+        await negotiate(pair);
+      }
+      try {
+        await waitFor(() => receivedVideo[1] > 0 && receivedVideo[2] > 0 && receivedVideo[3] > 0);
+      } catch (error) {
+        throw new Error(`${String(error)}; vídeos=${JSON.stringify(receivedVideo)}; estados=${pairs.map((pair) => `${pair.left.connectionState}/${pair.right.connectionState}`).join(",")}`);
+      }
+      check("screen video/audio renegotiation", receivedVideo[1] > 0 && receivedVideo[2] > 0 && receivedVideo[3] > 0);
+
+      for (const pair of pairs.filter((candidate) => candidate.leftIndex === 0)) {
+        pair.screenSenders.forEach((sender) => pair.left.removeTrack(sender));
+        await negotiate(pair);
+      }
+      captured.getTracks().forEach((track) => track.stop());
+      check("screen stop", captured.getTracks().every((track) => track.readyState === "ended"));
+      navigator.mediaDevices.getDisplayMedia = originalGetDisplayMedia;
+      nodeStreams.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
+      screenAudio.getTracks().forEach((track) => track.stop());
+      canvasStream.getTracks().forEach((track) => track.stop());
+      pairs.forEach((pair) => { pair.left.close(); pair.right.close(); });
+      result.ok = result.checks.every((item) => item.ok);
+    };
+    void connect().catch((error) => {
+      result.error = String(error && error.message ? error.message : error);
+    }).finally(() => { void finish(); });
+  })();
+</script>

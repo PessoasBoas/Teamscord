@@ -1,0 +1,16 @@
+services:
+  teamscord-relay:
+    build: .
+    restart: unless-stopped
+    environment:
+      TEAMSCORD_RELAY_TCP_PORT: ${TEAMSCORD_RELAY_TCP_PORT:-4001}
+      TEAMSCORD_RELAY_QUIC_PORT: ${TEAMSCORD_RELAY_QUIC_PORT:-4002}
+      TEAMSCORD_RELAY_IDENTITY_PATH: /app/data/identity.bin
+    ports:
+      - "${TEAMSCORD_RELAY_TCP_PORT:-4001}:${TEAMSCORD_RELAY_TCP_PORT:-4001}/tcp"
+      - "${TEAMSCORD_RELAY_QUIC_PORT:-4002}:${TEAMSCORD_RELAY_QUIC_PORT:-4002}/udp"
+    volumes:
+      - relay-data:/app/data
+
+volumes:
+  relay-data:
