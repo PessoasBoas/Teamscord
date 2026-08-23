@@ -69,7 +69,7 @@ O código do relay está em infra/relay/README.md. Em Railway:
 
 ### Estado verificado nesta documentação
 
-O GitHub mantém a release publicada [v1.0.3](https://github.com/PessoasBoas/Teamscord/releases/tag/v1.0.3); a build `1.0.4` também remove o relay da malha Gossipsub do grupo.
+O GitHub mantém a release publicada [v1.0.4](https://github.com/PessoasBoas/Teamscord/releases/tag/v1.0.4); a build `1.0.5` usa uma única reserva IPv4 e atualiza o estado quando o relay aceita a reserva.
 
 Na verificação desta documentação, o projeto Teamscord-Relay está publicado no workspace pessoal, com volume persistente e TCP Proxy ativo. O relay anuncia o endereço público e o app recebe o multiaddr padrão no build de release; o relay não armazena mensagens e o histórico continua local nos nodes.
 

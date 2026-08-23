@@ -68,10 +68,8 @@ const AGREEMENT_USERNAME: &str = "node-x25519";
 const MEDIA_CONFIG_SERVICE: &str = "com.teamscord.desktop.media";
 const MEDIA_CONFIG_USERNAME: &str = "ice-servers";
 const MAX_CALL_PARTICIPANTS: usize = 8;
-const BUILTIN_DEFAULT_RELAY_ADDRESSES: [&str; 2] = [
-    "/ip4/66.33.22.220/tcp/46712/p2p/12D3KooWNw8qUoVxFy8XcRkXhwPF4rdGjz4mqRf3hgqnoJbBvtwt",
-    "/dns4/altaria.proxy.rlwy.net/tcp/46712/p2p/12D3KooWNw8qUoVxFy8XcRkXhwPF4rdGjz4mqRf3hgqnoJbBvtwt",
-];
+const BUILTIN_DEFAULT_RELAY_ADDRESSES: [&str; 1] =
+    ["/ip4/66.33.22.220/tcp/46712/p2p/12D3KooWNw8qUoVxFy8XcRkXhwPF4rdGjz4mqRf3hgqnoJbBvtwt"];
 
 fn default_relay_addresses() -> Vec<String> {
     let addresses = option_env!("TEAMSCORD_DEFAULT_RELAY_ADDRESS")
@@ -3372,6 +3370,13 @@ async fn run_node(
                             emit_snapshot(&app, &snapshot);
                         }
                     }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Relay(relay::client::Event::ReservationReqAccepted { relay_peer_id, .. })) => {
+                    if let Ok(mut snapshot) = state.snapshot.lock() {
+                        snapshot.relay_connected = true;
+                        emit_snapshot(&app, &snapshot);
+                    }
+                    emit_network_event(&app, "relay-state", serde_json::json!({ "peer_id": relay_peer_id.to_string(), "state": "connected" }));
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     let mut is_relay = false;
