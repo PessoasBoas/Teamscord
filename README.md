@@ -46,7 +46,7 @@ Crie um grupo no app e compartilhe o convite assinado. O convite expira em 30 di
 
 Para ajudar conexões atrás de NAT, há um relay opcional em [infra/relay](infra/relay/README.md). Para mídia WebRTC fora da LAN, configure um Coturn opcional em [infra/turn](infra/turn/README.md); o app aceita ICE/STUN/TURN sem embutir servidor, domínio ou credenciais.
 
-As releases já incluem o relay público padrão `/dns4/altaria.proxy.rlwy.net/tcp/46712/p2p/12D3KooWNw8qUoVxFy8XcRkXhwPF4rdGjz4mqRf3hgqnoJbBvtwt`, então uma instalação nova tenta conectar automaticamente. Para trocar o relay em uma nova compilação, defina `TEAMSCORD_DEFAULT_RELAY_ADDRESS`; o painel de rede continua permitindo adicionar relays extras ou usar conexão direta/LAN.
+As releases já incluem o relay público padrão do Railway por IPv4 e hostname, então uma instalação nova tenta conectar automaticamente e refaz a tentativa a cada 15 segundos quando a reserva cai. Para trocar o relay em uma nova compilação, defina `TEAMSCORD_DEFAULT_RELAY_ADDRESS`; o painel de rede continua permitindo adicionar relays extras ou usar conexão direta/LAN.
 
 ## Controles, presença, amigos e mídia 1.0
 

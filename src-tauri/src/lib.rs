@@ -68,11 +68,16 @@ const AGREEMENT_USERNAME: &str = "node-x25519";
 const MEDIA_CONFIG_SERVICE: &str = "com.teamscord.desktop.media";
 const MEDIA_CONFIG_USERNAME: &str = "ice-servers";
 const MAX_CALL_PARTICIPANTS: usize = 8;
-const BUILTIN_DEFAULT_RELAY_ADDRESS: &str = "/dns4/altaria.proxy.rlwy.net/tcp/46712/p2p/12D3KooWNw8qUoVxFy8XcRkXhwPF4rdGjz4mqRf3hgqnoJbBvtwt";
+const BUILTIN_DEFAULT_RELAY_ADDRESSES: [&str; 2] = [
+    "/ip4/66.33.22.220/tcp/46712/p2p/12D3KooWNw8qUoVxFy8XcRkXhwPF4rdGjz4mqRf3hgqnoJbBvtwt",
+    "/dns4/altaria.proxy.rlwy.net/tcp/46712/p2p/12D3KooWNw8qUoVxFy8XcRkXhwPF4rdGjz4mqRf3hgqnoJbBvtwt",
+];
 
 fn default_relay_addresses() -> Vec<String> {
-    option_env!("TEAMSCORD_DEFAULT_RELAY_ADDRESS")
-        .or(Some(BUILTIN_DEFAULT_RELAY_ADDRESS))
+    let addresses = option_env!("TEAMSCORD_DEFAULT_RELAY_ADDRESS")
+        .map(|address| vec![address])
+        .unwrap_or_else(|| BUILTIN_DEFAULT_RELAY_ADDRESSES.to_vec());
+    addresses
         .into_iter()
         .map(str::trim)
         .filter(|address| !address.is_empty())
@@ -3237,6 +3242,25 @@ async fn run_node(
     loop {
         tokio::select! {
             _ = presence_heartbeat.tick() => {
+                let relay_addresses = state
+                    .network_config
+                    .lock()
+                    .map(|config| config.relay_addresses.clone())
+                    .unwrap_or_default();
+                let relay_connected = state
+                    .snapshot
+                    .lock()
+                    .map(|snapshot| snapshot.relay_connected)
+                    .unwrap_or(false);
+                if !relay_connected {
+                    for address in relay_addresses {
+                        if let Ok(address) = address.parse::<Multiaddr>() {
+                            if let Err(error) = redial_relay(&mut swarm, address) {
+                                emit_error(&app, error);
+                            }
+                        }
+                    }
+                }
                 if let Ok(announcement) = local_presence_announcement(&state) {
                     for peer_id in swarm.connected_peers().copied().collect::<Vec<_>>() {
                         swarm.behaviour_mut().presence.send_request(&peer_id, announcement.clone());
@@ -4278,6 +4302,13 @@ fn configure_relay(swarm: &mut Swarm<Behaviour>, address: Multiaddr) -> Result<(
     swarm
         .dial(address)
         .map_err(|error| format!("não foi possível conectar ao relay: {error}"))?;
+    Ok(())
+}
+
+fn redial_relay(swarm: &mut Swarm<Behaviour>, address: Multiaddr) -> Result<(), String> {
+    swarm
+        .dial(address.clone())
+        .map_err(|error| format!("não foi possível reconectar ao relay {address}: {error}"))?;
     Ok(())
 }
 
@@ -6531,9 +6562,14 @@ mod tests {
     fn default_relay_is_available_without_manual_network_setup() {
         let addresses = default_relay_addresses();
         let expected = option_env!("TEAMSCORD_DEFAULT_RELAY_ADDRESS")
-            .unwrap_or(BUILTIN_DEFAULT_RELAY_ADDRESS)
-            .to_string();
-        assert_eq!(addresses, vec![expected]);
+            .map(|address| vec![address.to_string()])
+            .unwrap_or_else(|| {
+                BUILTIN_DEFAULT_RELAY_ADDRESSES
+                    .iter()
+                    .map(|address| (*address).to_string())
+                    .collect()
+            });
+        assert_eq!(addresses, expected);
     }
 
     #[test]
