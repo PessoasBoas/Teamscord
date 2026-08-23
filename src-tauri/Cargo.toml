@@ -1,6 +1,6 @@
 [package]
 name = "teamscord"
-version = "1.0.3"
+version = "1.0.4"
 description = "Rede social descentralizada para grupos, chat e calls"
 authors = ["Teamscord"]
 edition = "2021"

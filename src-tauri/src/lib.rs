@@ -3374,7 +3374,6 @@ async fn run_node(
                     }
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                     let mut is_relay = false;
                     if let Ok(mut snapshot) = state.snapshot.lock() {
                         is_relay = snapshot.relay_addresses.iter().any(|address| relay_peer_id(address).as_ref() == Some(&peer_id));
@@ -3386,6 +3385,9 @@ async fn run_node(
                             emit_network_event(&app, "relay-state", serde_json::json!({ "peer_id": peer_id.to_string(), "state": "connected" }));
                         }
                         emit_snapshot(&app, &snapshot);
+                    }
+                    if !is_relay {
+                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                     }
                     let _ = state.database.remember_peer(&peer_id.to_string(), now_millis());
                     let _ = app.emit(
