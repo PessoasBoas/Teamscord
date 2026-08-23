@@ -68,9 +68,11 @@ const AGREEMENT_USERNAME: &str = "node-x25519";
 const MEDIA_CONFIG_SERVICE: &str = "com.teamscord.desktop.media";
 const MEDIA_CONFIG_USERNAME: &str = "ice-servers";
 const MAX_CALL_PARTICIPANTS: usize = 8;
+const BUILTIN_DEFAULT_RELAY_ADDRESS: &str = "/dns4/altaria.proxy.rlwy.net/tcp/46712/p2p/12D3KooWNw8qUoVxFy8XcRkXhwPF4rdGjz4mqRf3hgqnoJbBvtwt";
 
 fn default_relay_addresses() -> Vec<String> {
     option_env!("TEAMSCORD_DEFAULT_RELAY_ADDRESS")
+        .or(Some(BUILTIN_DEFAULT_RELAY_ADDRESS))
         .into_iter()
         .map(str::trim)
         .filter(|address| !address.is_empty())
@@ -6523,6 +6525,15 @@ mod tests {
                 .bootstrap_addresses,
             vec!["/ip4/127.0.0.1/tcp/4001"]
         );
+    }
+
+    #[test]
+    fn default_relay_is_available_without_manual_network_setup() {
+        let addresses = default_relay_addresses();
+        let expected = option_env!("TEAMSCORD_DEFAULT_RELAY_ADDRESS")
+            .unwrap_or(BUILTIN_DEFAULT_RELAY_ADDRESS)
+            .to_string();
+        assert_eq!(addresses, vec![expected]);
     }
 
     #[test]
