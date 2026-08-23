@@ -3242,6 +3242,7 @@ async fn run_node(
     loop {
         tokio::select! {
             _ = presence_heartbeat.tick() => {
+                let relay_peer_ids = configured_relay_peer_ids(&state);
                 let relay_addresses = state
                     .network_config
                     .lock()
@@ -3262,7 +3263,12 @@ async fn run_node(
                     }
                 }
                 if let Ok(announcement) = local_presence_announcement(&state) {
-                    for peer_id in swarm.connected_peers().copied().collect::<Vec<_>>() {
+                    for peer_id in swarm
+                        .connected_peers()
+                        .filter(|peer_id| !relay_peer_ids.contains(peer_id))
+                        .copied()
+                        .collect::<Vec<_>>()
+                    {
                         swarm.behaviour_mut().presence.send_request(&peer_id, announcement.clone());
                     }
                 }
@@ -3284,12 +3290,19 @@ async fn run_node(
                     if let Err(error) = subscribe_group(&mut swarm, &state.database, &group_id, &mut subscribed) { emit_error(&app, error); }
                 }
                 NodeCommand::RequestSync => {
-                    if let Err(error) = request_sync_all(&mut swarm, &state.database) { emit_error(&app, error); }
+                    let relay_peer_ids = configured_relay_peer_ids(&state);
+                    if let Err(error) = request_sync_all(&mut swarm, &state.database, &relay_peer_ids) { emit_error(&app, error); }
                     if let Err(error) = flush_outbox(&mut swarm, &state, &app) { emit_error(&app, error); }
                 }
                 NodeCommand::BroadcastPresence => {
+                    let relay_peer_ids = configured_relay_peer_ids(&state);
                     if let Ok(announcement) = local_presence_announcement(&state) {
-                        for peer_id in swarm.connected_peers().copied().collect::<Vec<_>>() {
+                        for peer_id in swarm
+                            .connected_peers()
+                            .filter(|peer_id| !relay_peer_ids.contains(peer_id))
+                            .copied()
+                            .collect::<Vec<_>>()
+                        {
                             swarm.behaviour_mut().presence.send_request(&peer_id, announcement.clone());
                         }
                     }
@@ -3326,7 +3339,12 @@ async fn run_node(
                 }
                 NodeCommand::PublishCall { signal } => {
                     let signal = *signal;
-                    let peers = swarm.connected_peers().copied().collect::<Vec<_>>();
+                    let relay_peer_ids = configured_relay_peer_ids(&state);
+                    let peers = swarm
+                        .connected_peers()
+                        .filter(|peer_id| !relay_peer_ids.contains(peer_id))
+                        .copied()
+                        .collect::<Vec<_>>();
                     for peer_id in peers {
                         swarm
                             .behaviour_mut()
@@ -3357,9 +3375,13 @@ async fn run_node(
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                    let mut is_relay = false;
                     if let Ok(mut snapshot) = state.snapshot.lock() {
-                        snapshot.connected_peers += 1;
-                        if snapshot.relay_addresses.iter().any(|address| relay_peer_id(address).as_ref() == Some(&peer_id)) {
+                        is_relay = snapshot.relay_addresses.iter().any(|address| relay_peer_id(address).as_ref() == Some(&peer_id));
+                        if !is_relay {
+                            snapshot.connected_peers += 1;
+                        }
+                        if is_relay {
                             snapshot.relay_connected = true;
                             emit_network_event(&app, "relay-state", serde_json::json!({ "peer_id": peer_id.to_string(), "state": "connected" }));
                         }
@@ -3387,22 +3409,30 @@ async fn run_node(
                             "checked_at": now_millis(),
                         }),
                     );
-                    let _ = request_sync(&mut swarm, &state.database, &peer_id);
-                    if let Err(error) = flush_outbox(&mut swarm, &state, &app) { emit_error(&app, error); }
-                    if let Ok(announcement) = local_presence_announcement(&state) {
-                        swarm.behaviour_mut().presence.send_request(&peer_id, announcement);
+                    if !is_relay {
+                        let _ = request_sync(&mut swarm, &state.database, &peer_id);
+                        if let Err(error) = flush_outbox(&mut swarm, &state, &app) { emit_error(&app, error); }
+                        if let Ok(announcement) = local_presence_announcement(&state) {
+                            swarm.behaviour_mut().presence.send_request(&peer_id, announcement);
+                        }
                     }
                 }
                 SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
+                    let mut is_relay = false;
                     if let Ok(mut snapshot) = state.snapshot.lock() {
-                        snapshot.connected_peers = snapshot.connected_peers.saturating_sub(1);
-                        if snapshot.relay_addresses.iter().any(|address| relay_peer_id(address).as_ref() == Some(&peer_id)) && num_established == 0 {
+                        is_relay = snapshot.relay_addresses.iter().any(|address| relay_peer_id(address).as_ref() == Some(&peer_id));
+                        if !is_relay {
+                            snapshot.connected_peers = snapshot.connected_peers.saturating_sub(1);
+                        }
+                        if is_relay && num_established == 0 {
                             snapshot.relay_connected = false;
                             emit_network_event(&app, "relay-state", serde_json::json!({ "peer_id": peer_id.to_string(), "state": "offline" }));
                         }
                         emit_snapshot(&app, &snapshot);
                     }
-                    emit_peer_presence(&app, &peer_id, "offline", "connection");
+                    if !is_relay {
+                        emit_peer_presence(&app, &peer_id, "offline", "connection");
+                    }
                     emit_network_event(
                         &app,
                         "connection-diagnostic",
@@ -3905,6 +3935,20 @@ fn direct_message_view(
         created_at: message.created_at,
         mine: message.from_peer_id == local_peer_id,
     })
+}
+
+fn configured_relay_peer_ids(state: &NodeState) -> HashSet<PeerId> {
+    state
+        .network_config
+        .lock()
+        .map(|config| {
+            config
+                .relay_addresses
+                .iter()
+                .filter_map(|address| relay_peer_id(address))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn enqueue_and_publish_direct(
@@ -4583,8 +4627,16 @@ fn advance_sync_cursor(
     }))
 }
 
-fn request_sync_all(swarm: &mut Swarm<Behaviour>, database: &Database) -> Result<(), String> {
-    let peers = swarm.connected_peers().copied().collect::<Vec<_>>();
+fn request_sync_all(
+    swarm: &mut Swarm<Behaviour>,
+    database: &Database,
+    relay_peer_ids: &HashSet<PeerId>,
+) -> Result<(), String> {
+    let peers = swarm
+        .connected_peers()
+        .filter(|peer_id| !relay_peer_ids.contains(peer_id))
+        .copied()
+        .collect::<Vec<_>>();
     for peer_id in peers {
         request_sync(swarm, database, &peer_id)?;
     }
