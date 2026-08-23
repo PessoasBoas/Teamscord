@@ -1,6 +1,6 @@
 # Teamscord
 
-Teamscord 0.3.0 é um chat de grupos privados com um node local por instalação. Mensagens, eventos administrativos, presença e épocas de chave são sincronizados entre peers por libp2p; áudio e compartilhamento de tela usam uma malha WebRTC P2P opcional.
+Teamscord 1.0.0 é um chat P2P privado com grupos, amigos e mensagens diretas, usando um node local por instalação. Mensagens, contatos, eventos administrativos, presença e épocas de chave são sincronizados entre peers por libp2p; áudio e compartilhamento de tela usam uma malha WebRTC P2P opcional.
 
 ## Stack
 
@@ -34,7 +34,11 @@ npm run release
 
 O comando gera o `.exe` em `src-tauri/target/release/bundle/nsis` e um arquivo `.sha256`. O Windows pode mostrar um aviso do SmartScreen até o produto possuir certificado de assinatura. O app consulta periodicamente a release estável de `PessoasBoas/Teamscord`; quando encontra uma versão maior, mostra um popup com link para o instalador NSIS e as notas da versão. A instalação continua manual e confirmada pelo usuário: não há atualização silenciosa nem auto-update embutido nesta versão.
 
-Ao publicar uma versão, crie uma GitHub Release com uma tag semver (por exemplo `v0.3.0`) e anexe o `.exe` x64 gerado junto com o `.sha256`. O verificador só aceita releases estáveis, URLs do repositório oficial e o instalador cujo nome termina em `_x64-setup.exe`.
+Ao publicar uma versão, crie uma GitHub Release com uma tag semver (por exemplo `v1.0.0`) e anexe o `.exe` x64 gerado junto com o `.sha256`. O verificador só aceita releases estáveis, URLs do repositório oficial e o instalador cujo nome termina em `_x64-setup.exe`.
+
+### Amigos, DMs e QR
+
+Cada instalação possui um cartão de contato assinado, copiável ou exportável como QR `teamscord://contact/v1/...`. Pedidos de amizade e mensagens diretas são cifrados entre os nodes, armazenados localmente e mantidos na outbox quando o contato está offline. Convites de grupos continuam assinados, autocontidos e válidos por 30 dias; o app também gera QR para compartilhamento.
 
 ## Grupos e rede
 
@@ -44,7 +48,7 @@ Para ajudar conexões atrás de NAT, há um relay opcional em [infra/relay](infr
 
 O endereço público do relay da release é injetado no build pela variável `TEAMSCORD_DEFAULT_RELAY_ADDRESS`; quando ela não está definida, o app continua funcionando em conexão direta/LAN e permite adicionar relays pelo painel de rede.
 
-## Controles, presença e mídia 0.3
+## Controles, presença, amigos e mídia 1.0
 
 O grupo tem cargos fixos `Owner`, `Admin`, `Mod` e `Member`. A interface oferece membros, permissões por canal, canais, convites e auditoria; ações destrutivas exigem confirmação. O Owner é a raiz de autoridade; um Admin só pode alterar `Mod`/`Member` quando sua concessão de Admin foi registrada por um evento assinado pelo Owner. Owner, Admin e Mod podem apagar mensagens conforme a matriz de permissões. Expulsão e banimento encerram o acesso futuro ao rotacionar a chave do grupo e distribuir a nova época somente aos membros ativos.
 

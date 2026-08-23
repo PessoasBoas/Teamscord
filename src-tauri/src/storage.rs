@@ -106,6 +106,33 @@ pub struct OutboxRecord {
     pub last_attempt_at: Option<i64>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContactRecord {
+    pub peer_id: String,
+    pub display_name: String,
+    pub public_key: Vec<u8>,
+    pub x25519_public_key: Vec<u8>,
+    pub status: String,
+    pub requested_by: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_seen: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DirectMessageRecord {
+    pub event_id: String,
+    pub conversation_id: String,
+    pub from_peer_id: String,
+    pub to_peer_id: String,
+    pub from_public_key: Vec<u8>,
+    pub from_x25519_public_key: Vec<u8>,
+    pub created_at: i64,
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
 pub struct Database {
     connection: Mutex<Connection>,
 }
@@ -264,7 +291,32 @@ impl Database {
                channel_id TEXT NOT NULL,
                deleted_by TEXT NOT NULL,
                deleted_at INTEGER NOT NULL
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS contacts (
+               peer_id TEXT PRIMARY KEY,
+               display_name TEXT NOT NULL,
+               public_key BLOB NOT NULL,
+               x25519_public_key BLOB NOT NULL,
+               status TEXT NOT NULL,
+               requested_by TEXT NOT NULL,
+               created_at INTEGER NOT NULL,
+               updated_at INTEGER NOT NULL,
+               last_seen INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status, updated_at DESC);
+             CREATE TABLE IF NOT EXISTS direct_messages (
+               event_id TEXT PRIMARY KEY,
+               conversation_id TEXT NOT NULL,
+               from_peer_id TEXT NOT NULL,
+               to_peer_id TEXT NOT NULL,
+               from_public_key BLOB NOT NULL,
+               from_x25519_public_key BLOB NOT NULL,
+               created_at INTEGER NOT NULL,
+               nonce BLOB NOT NULL,
+               ciphertext BLOB NOT NULL,
+               signature BLOB NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_direct_messages_conversation ON direct_messages(conversation_id, created_at, event_id);",
         ).map_err(|error| format!("migração SQLite falhou: {error}"))
         .and_then(|_| {
              ensure_column(&connection, "groups", "current_key_epoch", "INTEGER NOT NULL DEFAULT 1")?;
@@ -517,6 +569,141 @@ impl Database {
             )
             .map_err(|error| format!("não foi possível salvar permissão do canal: {error}"))?;
         Ok(())
+    }
+
+    pub fn upsert_contact(&self, contact: &ContactRecord) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "banco local bloqueado".to_string())?;
+        connection
+            .execute(
+                "INSERT INTO contacts(peer_id, display_name, public_key, x25519_public_key, status, requested_by, created_at, updated_at, last_seen) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(peer_id) DO UPDATE SET display_name=excluded.display_name, public_key=excluded.public_key, x25519_public_key=excluded.x25519_public_key, status=excluded.status, requested_by=excluded.requested_by, updated_at=excluded.updated_at, last_seen=excluded.last_seen",
+                params![
+                    contact.peer_id,
+                    contact.display_name,
+                    contact.public_key,
+                    contact.x25519_public_key,
+                    contact.status,
+                    contact.requested_by,
+                    contact.created_at,
+                    contact.updated_at,
+                    contact.last_seen,
+                ],
+            )
+            .map_err(|error| format!("não foi possível salvar contato: {error}"))?;
+        Ok(())
+    }
+
+    pub fn get_contact(&self, peer_id: &str) -> Result<Option<ContactRecord>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "banco local bloqueado".to_string())?;
+        connection
+            .query_row(
+                "SELECT peer_id, display_name, public_key, x25519_public_key, status, requested_by, created_at, updated_at, last_seen FROM contacts WHERE peer_id = ?1",
+                params![peer_id],
+                |row| {
+                    Ok(ContactRecord {
+                        peer_id: row.get(0)?,
+                        display_name: row.get(1)?,
+                        public_key: row.get(2)?,
+                        x25519_public_key: row.get(3)?,
+                        status: row.get(4)?,
+                        requested_by: row.get(5)?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
+                        last_seen: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| format!("não foi possível ler contato: {error}"))
+    }
+
+    pub fn list_contacts(&self, status: Option<&str>) -> Result<Vec<ContactRecord>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "banco local bloqueado".to_string())?;
+        let mut statement = connection
+            .prepare("SELECT peer_id, display_name, public_key, x25519_public_key, status, requested_by, created_at, updated_at, last_seen FROM contacts WHERE (?1 IS NULL OR status = ?1) ORDER BY updated_at DESC, peer_id")
+            .map_err(|error| format!("não foi possível listar contatos: {error}"))?;
+        let rows = statement
+            .query_map(params![status], |row| {
+                Ok(ContactRecord {
+                    peer_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    public_key: row.get(2)?,
+                    x25519_public_key: row.get(3)?,
+                    status: row.get(4)?,
+                    requested_by: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                    last_seen: row.get(8)?,
+                })
+            })
+            .map_err(|error| format!("não foi possível listar contatos: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("não foi possível listar contatos: {error}"))
+    }
+
+    pub fn insert_direct_message(&self, message: &DirectMessageRecord) -> Result<bool, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "banco local bloqueado".to_string())?;
+        let inserted = connection
+            .execute(
+                "INSERT OR IGNORE INTO direct_messages(event_id, conversation_id, from_peer_id, to_peer_id, from_public_key, from_x25519_public_key, created_at, nonce, ciphertext, signature) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    message.event_id,
+                    message.conversation_id,
+                    message.from_peer_id,
+                    message.to_peer_id,
+                    message.from_public_key,
+                    message.from_x25519_public_key,
+                    message.created_at,
+                    message.nonce,
+                    message.ciphertext,
+                    message.signature,
+                ],
+            )
+            .map_err(|error| format!("não foi possível salvar mensagem privada: {error}"))?;
+        Ok(inserted > 0)
+    }
+
+    pub fn list_direct_messages(
+        &self,
+        conversation_id: &str,
+        limit: u32,
+    ) -> Result<Vec<DirectMessageRecord>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "banco local bloqueado".to_string())?;
+        let mut statement = connection
+            .prepare("SELECT event_id, conversation_id, from_peer_id, to_peer_id, from_public_key, from_x25519_public_key, created_at, nonce, ciphertext, signature FROM direct_messages WHERE conversation_id = ?1 ORDER BY created_at ASC, event_id ASC LIMIT ?2")
+            .map_err(|error| format!("não foi possível ler mensagens privadas: {error}"))?;
+        let rows = statement
+            .query_map(params![conversation_id, limit.min(500)], |row| {
+                Ok(DirectMessageRecord {
+                    event_id: row.get(0)?,
+                    conversation_id: row.get(1)?,
+                    from_peer_id: row.get(2)?,
+                    to_peer_id: row.get(3)?,
+                    from_public_key: row.get(4)?,
+                    from_x25519_public_key: row.get(5)?,
+                    created_at: row.get(6)?,
+                    nonce: row.get(7)?,
+                    ciphertext: row.get(8)?,
+                    signature: row.get(9)?,
+                })
+            })
+            .map_err(|error| format!("não foi possível ler mensagens privadas: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("não foi possível ler mensagens privadas: {error}"))
     }
 
     pub fn insert_message(&self, message: &MessageEnvelope) -> Result<bool, String> {
@@ -1629,5 +1816,45 @@ mod tests {
         assert!(!database
             .delete_message("delete-me", "g3", "g3:geral", "owner", 4)
             .expect("deduplicated delete"));
+    }
+
+    #[test]
+    fn contacts_and_direct_messages_are_persistent_and_deduplicated() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = Database::open(directory.path().join("teamscord.sqlite")).expect("db");
+        let contact = ContactRecord {
+            peer_id: "peer-2".into(),
+            display_name: "Amigo".into(),
+            public_key: vec![1, 2],
+            x25519_public_key: vec![3; 32],
+            status: "accepted".into(),
+            requested_by: "local".into(),
+            created_at: 1,
+            updated_at: 2,
+            last_seen: 2,
+        };
+        database.upsert_contact(&contact).expect("contact");
+        assert_eq!(database.list_contacts(Some("accepted")).unwrap().len(), 1);
+        let direct = DirectMessageRecord {
+            event_id: "dm-1".into(),
+            conversation_id: "dm:peer-1:peer-2".into(),
+            from_peer_id: "peer-1".into(),
+            to_peer_id: "peer-2".into(),
+            from_public_key: vec![4],
+            from_x25519_public_key: vec![5; 32],
+            created_at: 3,
+            nonce: vec![6; 24],
+            ciphertext: vec![7],
+            signature: vec![8],
+        };
+        assert!(database.insert_direct_message(&direct).unwrap());
+        assert!(!database.insert_direct_message(&direct).unwrap());
+        assert_eq!(
+            database
+                .list_direct_messages("dm:peer-1:peer-2", 50)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

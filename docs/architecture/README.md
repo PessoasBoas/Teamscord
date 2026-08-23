@@ -1,6 +1,6 @@
 # Teamscord — arquitetura e operação
 
-Esta pasta contém a documentação visual da versão 0.3.2. Cada diagrama tem duas formas:
+Esta pasta contém a documentação visual da versão 1.0.0. Cada diagrama tem duas formas:
 
 - .mmd: fonte Mermaid versionada e editável.
 - .png: renderização compilada para leitura rápida, revisão e compartilhamento.
@@ -69,7 +69,7 @@ O código do relay está em infra/relay/README.md. Em Railway:
 
 ### Estado verificado nesta documentação
 
-O GitHub está publicado em main, com a release [v0.3.2](https://github.com/PessoasBoas/Teamscord/releases/tag/v0.3.2) e os assets NSIS/checksum.
+O GitHub mantém a release publicada [v0.3.2](https://github.com/PessoasBoas/Teamscord/releases/tag/v0.3.2); a build local `1.0.0` gera NSIS/checksum para a próxima publicação.
 
 Na verificação desta documentação, o projeto Teamscord-Relay está publicado no workspace pessoal, com volume persistente e TCP Proxy ativo. O relay anuncia o endereço público e o app recebe o multiaddr padrão no build de release; o relay não armazena mensagens e o histórico continua local nos nodes.
 

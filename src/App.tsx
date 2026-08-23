@@ -1,18 +1,21 @@
 import { type CSSProperties, type FormEvent, type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Bell, ChevronDown, CircleHelp, Copy, Hash, Headphones, LogOut, Menu, Mic, MicOff, MonitorUp,
-  Plus, Search, Settings, ShieldCheck, Signal, UserPlus, Users, Volume2, Wifi, X,
+  Bell, ChevronDown, CircleHelp, Copy, Hash, Headphones, LogOut, Menu, MessageCircle, Mic, MicOff, MonitorUp,
+  Plus, QrCode, Search, Settings, ShieldCheck, Signal, UserPlus, Users, Volume2, Wifi, X,
 } from "lucide-react";
 import { CallDock, CallStage, type CallStageHandle } from "./components/CallStage";
 import { ChatPanel, EmptyWorkspace } from "./components/Chat";
 import { GroupSettings } from "./components/GroupSettings";
 import { channelIcon, ChannelRow, ChannelSection, MemberRow } from "./components/Navigation";
 import { NetworkModal } from "./components/NetworkModal";
-import { MenuCard, ModalHeader, PopoverPanel } from "./components/Ui";
+import { MenuCard, ModalHeader, PopoverPanel, ToastNotice } from "./components/Ui";
 import { UpdateModal } from "./components/UpdateModal";
 import { UserSettings } from "./components/UserSettings";
+import { FriendsPanel } from "./components/FriendsPanel";
 import { callKey, memberIsInCall, mergeMessages, normalizeGroup, peerIsOnline, removeParticipant, selectInitialChannel } from "./lib/ui-model";
 import { checkForUpdate, DISMISSED_UPDATE_STORAGE, type UpdateInfo } from "./lib/update-checker";
+import { formatNotice } from "./lib/notice";
+import { qrDataUrl, readQrImage } from "./lib/qr";
 import {
   type AppNotification, type CallSignalEvent, type CallState, type Channel, type ChatMessage, type Group,
   type GroupMember, isDesktop, nodeApi, type NetworkDiagnostics, type NodeSnapshot, type NetworkStatus, type SearchResult, type UserPreferences,
@@ -21,10 +24,11 @@ import {
 const STORAGE_GROUP = "teamscord.active-group";
 const STORAGE_CHANNEL = "teamscord.active-channel";
 const STORAGE_PREFERENCES = "teamscord.user-preferences";
-const DEFAULT_PREFERENCES: UserPreferences = { theme: "dark", font: "manrope", scale: "comfortable", display_name: "Você" };
+const DEFAULT_PREFERENCES: UserPreferences = { theme: "dark", font: "manrope", scale: "comfortable", display_name: "Você", accent_color: "#5865f2", avatar_color: "#5865f2" };
 
-type Modal = "network" | "create" | "join" | "settings" | "user-settings" | "create-channel" | null;
+type Modal = "network" | "create" | "join" | "invite" | "friends" | "settings" | "user-settings" | "create-channel" | null;
 type Popover = "server" | "rail" | "notifications" | "search" | "members" | "profile" | null;
+type ActiveView = "server" | "direct";
 type CallTarget = { groupId: string; channelId: string };
 type ContextMenuState = { kind: "server" | "channel" | "member" | "message"; groupId: string; channelId?: string; peerId?: string; messageId?: string; x: number; y: number };
 
@@ -33,12 +37,21 @@ function readPreferences(): UserPreferences {
   if (typeof window === "undefined") return DEFAULT_PREFERENCES;
   try { return { ...DEFAULT_PREFERENCES, ...JSON.parse(localStorage.getItem(STORAGE_PREFERENCES) ?? "{}") }; } catch { return DEFAULT_PREFERENCES; }
 }
+function applyStoredGroupProfile(group: Group): Group {
+  if (typeof window === "undefined") return group;
+  try {
+    const saved = JSON.parse(localStorage.getItem(`teamscord.group-profile:${group.id}`) ?? "null") as { name?: string; initials?: string; color?: string } | null;
+    return { ...group, name: saved?.name || group.name, initials: saved?.initials || group.initials, color: saved?.color || group.color };
+  } catch {
+    return group;
+  }
+}
 function statusCopy(status: NetworkStatus) { return status === "online" ? "node online" : status === "starting" ? "conectando node" : status === "syncing" ? "sincronizando" : status === "reconnecting" ? "reconectando" : status === "preview" ? "prévia web" : "node offline"; }
-
 function App() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [activeGroupId, setActiveGroupId] = useState(() => readStored(STORAGE_GROUP));
   const [activeChannelId, setActiveChannelId] = useState(() => readStored(STORAGE_CHANNEL));
+  const [activeView, setActiveView] = useState<ActiveView>("server");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [historyRevision, setHistoryRevision] = useState(0);
   const [draft, setDraft] = useState("");
@@ -56,6 +69,7 @@ function App() {
   const [groupName, setGroupName] = useState("");
   const [inviteText, setInviteText] = useState("");
   const [generatedInvite, setGeneratedInvite] = useState("");
+  const [generatedInviteQr, setGeneratedInviteQr] = useState("");
   const [peerAddress, setPeerAddress] = useState("");
   const [relayAddress, setRelayAddress] = useState("");
   const [bootstrapAddress, setBootstrapAddress] = useState("");
@@ -96,6 +110,8 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.font = preferences.font;
     document.documentElement.dataset.scale = preferences.scale;
+    document.documentElement.style.setProperty("--user-accent", preferences.accent_color ?? "#5865f2");
+    document.documentElement.style.setProperty("--user-avatar", preferences.avatar_color ?? "#5865f2");
     localStorage.setItem(STORAGE_PREFERENCES, JSON.stringify(preferences));
     const media = window.matchMedia?.("(prefers-color-scheme: light)");
     const applyTheme = () => {
@@ -108,6 +124,14 @@ function App() {
     media.addEventListener?.("change", applyTheme);
     return () => media.removeEventListener?.("change", applyTheme);
   }, [preferences]);
+
+  useEffect(() => {
+    if (!error) return;
+    const notice = formatNotice(error);
+    if (!notice.transient) return;
+    const timer = window.setTimeout(() => setError((current) => current === error ? "" : current), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [error]);
 
   useEffect(() => {
     if (!isDesktop()) return;
@@ -154,7 +178,7 @@ function App() {
   }, [modal, popover, contextMenu]);
 
   async function refreshGroups() {
-    const loaded = (await nodeApi.getGroups()).map(normalizeGroup);
+    const loaded = (await nodeApi.getGroups()).map((group) => applyStoredGroupProfile(normalizeGroup(group)));
     setGroups(loaded);
     return loaded;
   }
@@ -201,6 +225,13 @@ function App() {
             const state = event.data as CallState;
             setCallStates((items) => ({ ...items, [callKey(state.group_id, state.channel_id)]: state }));
           }
+          if (event.kind === "direct-message" && event.data) {
+            const direct = event.data as { author?: string; content?: string };
+            setNotifications((items) => [{ id: crypto.randomUUID(), kind: "message" as const, title: direct.author ?? "Mensagem privada", body: direct.content ?? "nova mensagem", created_at: Date.now(), read: false }, ...items].slice(0, 100));
+          }
+          if (event.kind === "friend-updated") {
+            setNotifications((items) => [{ id: crypto.randomUUID(), kind: "member" as const, title: "Amizade atualizada", body: "Você recebeu uma atualização de contato.", created_at: Date.now(), read: false }, ...items].slice(0, 100));
+          }
           if (event.kind === "sync-state" && event.data) {
             const state = event.data as { state?: string };
             setSyncLabel(state.state === "synced" ? "sincronizado" : state.state === "error" ? "erro de sincronização" : state.state === "waiting" ? "aguardando peer" : "sincronizando");
@@ -212,14 +243,14 @@ function App() {
             setNodeStatus(peer.state === "disconnected" ? "reconnecting" : "syncing");
           }
           if (event.kind === "peer-presence" && event.data) {
-            const presence = event.data as { peer_id?: string; state?: string };
+            const presence = event.data as { peer_id?: string; state?: string; retryable?: boolean };
             if (presence.peer_id) setConnectedPeerIds((current) => {
               const next = new Set(current);
               if (presence.state === "online") next.add(presence.peer_id!);
               else if (presence.state === "offline") next.delete(presence.peer_id!);
               return next;
             });
-            setNodeStatus(presence.state === "offline" ? "reconnecting" : "online");
+            setNodeStatus(presence.state === "offline" || presence.state === "reconnecting" || presence.state === "connecting" ? "reconnecting" : "online");
             if (presence.state === "online") void callRef.current?.reannounce().catch((reason) => setError(String(reason)));
           }
           if (event.kind === "relay-state" && event.data) {
@@ -340,9 +371,15 @@ function App() {
     return () => { cancelled = true; window.clearInterval(interval); };
   }, []);
 
-  function selectGroup(group: Group) { setActiveGroupId(group.id); setActiveChannelId(selectInitialChannel(group)); setMessages([]); setPopover(null); setContextMenu(null); setError(""); }
+  function selectGroup(group: Group) { setActiveView("server"); setActiveGroupId(group.id); setActiveChannelId(selectInitialChannel(group)); setMessages([]); setPopover(null); setContextMenu(null); setError(""); }
   function selectChannel(channel: Channel) { setActiveChannelId(channel.id); setMessages([]); setPopover(null); setContextMenu(null); setFeedback(""); }
   function openModal(next: Modal) { setPopover(null); setContextMenu(null); setModal(next); }
+  function openDirectMessages() { setActiveView("direct"); setModal(null); setPopover(null); setContextMenu(null); setError(""); }
+
+  useEffect(() => {
+    if (!generatedInvite) { setGeneratedInviteQr(""); return; }
+    void qrDataUrl(`teamscord://invite/v1/${generatedInvite}`, 320).then(setGeneratedInviteQr).catch((reason) => setError(String(reason)));
+  }, [generatedInvite]);
   function openContextMenu(event: ReactMouseEvent, target: Omit<ContextMenuState, "x" | "y">) {
     event.preventDefault();
     setPopover(null);
@@ -462,6 +499,7 @@ function App() {
     setFeedback("solicitação de mute enviada");
   }
   function handlePreferences(next: UserPreferences) { setPreferences(next); }
+  function handleGroupProfileChange(next: Group) { setGroups((items) => items.map((group) => group.id === next.id ? next : group)); }
   async function toggleLocalMute() {
     if (callTarget) {
       await callRef.current?.toggleMute();
@@ -512,13 +550,18 @@ function App() {
       <div className="brand-mark">T</div><div className="server-divider" />
       {groups.map((group) => <button className={`server-button ${activeGroup?.id === group.id ? "active" : ""}`} key={group.id} style={{ "--server-color": group.color } as CSSProperties} onClick={() => selectGroup(group)} onContextMenu={(event) => openContextMenu(event, { kind: "server", groupId: group.id })} title={group.name}><span>{group.initials}</span>{activeGroup?.id === group.id && <i />}</button>)}
       <button className="server-button add-server" title="Criar ou entrar em servidor" onClick={() => setPopover(popover === "rail" ? null : "rail")}><Plus size={21} /></button>
+      <button className={`server-button friends-rail-button ${activeView === "direct" ? "active" : ""}`} title="Amigos e mensagens privadas" onClick={openDirectMessages}><Users size={19} /></button>
       {popover === "rail" && <MenuCard className="rail-menu"><button onClick={() => openModal("create")}><Plus size={15} /> Criar servidor</button><button onClick={() => openModal("join")}><UserPlus size={15} /> Entrar por convite</button></MenuCard>}
       <div className="rail-bottom"><button className="icon-button" title="Ajuda" aria-label="Ajuda"><CircleHelp size={20} /></button></div>
     </aside>
 
-      <aside className="channel-sidebar">
+      <aside className={`channel-sidebar ${activeView === "direct" ? "direct-nav-sidebar" : ""}`}>
+      <div className="sidebar-home-nav" aria-label="Navegação principal">
+        <button className={`sidebar-home-item ${activeView === "direct" ? "active" : ""}`} onClick={openDirectMessages}><MessageCircle size={18} /><span>Mensagens diretas</span><Users size={15} className="sidebar-home-action" /></button>
+        <button className={`sidebar-home-item ${activeView === "direct" ? "active" : ""}`} onClick={openDirectMessages}><Users size={18} /><span>Amigos</span></button>
+      </div>
       <button className="workspace-picker" onClick={() => setPopover(popover === "server" ? null : "server")} onContextMenu={(event) => activeGroup && openContextMenu(event, { kind: "server", groupId: activeGroup.id })} aria-expanded={popover === "server"}><span>{activeGroup?.name ?? "Seus grupos"}</span><ChevronDown size={17} /></button>
-      {popover === "server" && <MenuCard className="server-menu"><button onClick={() => activeGroup && void nodeApi.createInvite(activeGroup.id).then((invite) => copyText(invite, "convite do servidor copiado")).catch((reason) => setError(String(reason)))} disabled={!activeGroup}><UserPlus size={15} /> Criar link de convite</button><button onClick={() => openModal("settings")} disabled={!activeGroup}><Settings size={15} /> Configurações do servidor</button><button onClick={() => openModal("create-channel")} disabled={!activeGroup}><Plus size={15} /> Criar canal</button><span className="menu-separator" /><button onClick={() => void leaveActiveGroup()} disabled={!activeGroup}><LogOut size={15} /> Sair do servidor</button></MenuCard>}
+        {popover === "server" && <MenuCard className="server-menu"><button onClick={() => activeGroup && void nodeApi.createInvite(activeGroup.id).then((invite) => { setGeneratedInvite(invite); openModal("invite"); }).catch((reason) => setError(String(reason)))} disabled={!activeGroup}><UserPlus size={15} /> Criar convite com QR</button><button onClick={openDirectMessages}><Users size={15} /> Amigos e mensagens privadas</button><button onClick={() => openModal("settings")} disabled={!activeGroup}><Settings size={15} /> Configurações do servidor</button><button onClick={() => openModal("create-channel")} disabled={!activeGroup}><Plus size={15} /> Criar canal</button><span className="menu-separator" /><button onClick={() => void leaveActiveGroup()} disabled={!activeGroup}><LogOut size={15} /> Sair do servidor</button></MenuCard>}
       <div className="sidebar-scroll">
         <div className={`network-card ${nodeStatus === "offline" ? "network-card-offline" : ""}`}><div className="network-card-heading"><span className="live-dot" />{statusLabel.toUpperCase()}</div><div className="network-card-copy">{syncLabel} · mensagens cifradas e distribuídas entre os nodes conectados</div><button onClick={() => openModal("network")}>ver detalhes <Signal size={14} /></button></div>
         {activeGroup ? <>
@@ -539,22 +582,27 @@ function App() {
       </div>
     </aside>
 
-    <main className="main-panel">
-      <header className="topbar"><div className="channel-title"><span className="title-icon">{activeChannel ? channelIcon(activeChannel.kind) : <Users size={17} />}</span><div><h1>{activeChannel?.name ?? "comece por um grupo"}</h1><p>{channelDescription}</p></div></div><div className="top-actions"><button className="top-action" title="Membros do servidor" onClick={() => setPopover(popover === "members" ? null : "members")}><Users size={18} /><span>{members.length}</span></button><button className="top-action notification-action" title="Notificações" onClick={() => { setPopover(popover === "notifications" ? null : "notifications"); markNotificationsRead(); }}><Bell size={18} />{unreadNotifications > 0 && <b>{unreadNotifications > 9 ? "9+" : unreadNotifications}</b>}</button><button className="top-action" title="Buscar mensagens, canais e membros" onClick={() => setPopover(popover === "search" ? null : "search")}><Search size={18} /></button><div className="top-divider" /><button className="profile-button" onClick={() => setPopover(popover === "profile" ? null : "profile")}><span className="avatar small avatar-purple">{preferences.display_name.slice(0, 2).toUpperCase()}<span className={`presence ${node.is_running ? "online" : "idle"}`} /></span><ChevronDown size={15} /></button></div>
+    <main className={`main-panel ${activeView === "direct" ? "direct-view" : ""}`}>
+      {activeView === "direct" && <header className="topbar direct-topbar"><div className="channel-title"><span className="title-icon"><MessageCircle size={17} /></span><div><h1>Mensagens diretas</h1><p>conversas privadas entre seus contatos</p></div></div><div className="top-actions"><button className="top-action" title="Voltar aos servidores" onClick={() => setActiveView("server")}><Hash size={18} /></button><button className="top-action" title="Notificações" onClick={() => { setPopover(popover === "notifications" ? null : "notifications"); markNotificationsRead(); }}><Bell size={18} />{unreadNotifications > 0 && <b>{unreadNotifications > 9 ? "9+" : unreadNotifications}</b>}</button><button className="top-action" title="Buscar contatos" onClick={() => openDirectMessages()}><Search size={18} /></button><div className="top-divider" /><button className="profile-button" onClick={() => setPopover(popover === "profile" ? null : "profile")}><span className="avatar small avatar-purple">{preferences.display_name.slice(0, 2).toUpperCase()}<span className={`presence ${node.is_running ? "online" : "idle"}`} /></span><ChevronDown size={15} /></button></div></header>}
+      <header className="topbar"><div className="channel-title"><span className="title-icon">{activeChannel ? channelIcon(activeChannel.kind) : <Users size={17} />}</span><div><h1>{activeChannel?.name ?? "comece por um grupo"}</h1><p>{channelDescription}</p></div></div><div className="top-actions"><button className="top-action" title="Amigos e mensagens privadas" onClick={() => openModal("friends")}><Users size={18} /></button><button className="top-action" title="Membros do servidor" onClick={() => setPopover(popover === "members" ? null : "members")}><Users size={18} /><span>{members.length}</span></button><button className="top-action notification-action" title="Notificações" onClick={() => { setPopover(popover === "notifications" ? null : "notifications"); markNotificationsRead(); }}><Bell size={18} />{unreadNotifications > 0 && <b>{unreadNotifications > 9 ? "9+" : unreadNotifications}</b>}</button><button className="top-action" title="Buscar mensagens, canais e membros" onClick={() => setPopover(popover === "search" ? null : "search")}><Search size={18} /></button><div className="top-divider" /><button className="profile-button" onClick={() => setPopover(popover === "profile" ? null : "profile")}><span className="avatar small avatar-purple">{preferences.display_name.slice(0, 2).toUpperCase()}<span className={`presence ${node.is_running ? "online" : "idle"}`} /></span><ChevronDown size={15} /></button></div>
         {popover === "profile" && <MenuCard className="profile-menu"><strong>{preferences.display_name}</strong><span>{node.peer_id ? `${node.peer_id.slice(0, 18)}…` : "node não iniciado"}</span><button onClick={() => openModal("user-settings")}><Settings size={15} /> Configurações do usuário</button></MenuCard>}
         {popover === "notifications" && <PopoverPanel className="notification-panel" title="Notificações" onClose={() => setPopover(null)}>{notifications.length ? notifications.map((notification) => <article className={`notification-row ${notification.read ? "read" : ""}`} key={notification.id}><span className="notification-icon">{notification.kind === "message" ? <Hash size={14} /> : notification.kind === "call" ? <Volume2 size={14} /> : <ShieldCheck size={14} />}</span><div><strong>{notification.title}</strong><p>{notification.body}</p><time>{new Date(notification.created_at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}</time></div></article>) : <div className="empty-state">Nenhuma notificação nova.</div>}</PopoverPanel>}
         {popover === "search" && <PopoverPanel className="search-panel" title="Buscar no servidor" onClose={() => setPopover(null)}><input autoFocus value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="mensagens, canais ou membros" />{searchResults.length ? <div className="search-results">{searchResults.map((result) => <button key={`${result.kind}:${result.id}`} onClick={() => { if (result.channel_id) { setActiveGroupId(result.group_id); setActiveChannelId(result.channel_id); } setPopover(null); }}>{result.kind === "message" ? <Hash size={14} /> : result.kind === "member" ? <Users size={14} /> : <Volume2 size={14} />}<span><strong>{result.title}</strong><small>{result.subtitle}</small></span></button>)}</div> : <div className="empty-state">Digite para pesquisar o histórico local.</div>}</PopoverPanel>}
         {popover === "members" && <PopoverPanel className="members-panel" title={`Membros · ${members.length}`} onClose={() => setPopover(null)}>{members.length ? members.map((member) => <MemberRow key={member.peer_id} member={member} online={memberIsOnline(member.peer_id)} activeCall={memberInActiveCall(member.peer_id)} />) : <div className="empty-state">A lista será preenchida após a sincronização.</div>}</PopoverPanel>}
       </header>
 
-      {!activeGroup || !activeChannel ? <EmptyWorkspace onCreate={() => openModal("create")} onJoin={() => openModal("join")} /> : <div className={`workspace-layer ${activeChannel.kind === "voice" ? "voice-layout" : "text-layout"}`}>
+      {activeView === "direct" && <div className="direct-page-stage"><FriendsPanel mode="page" displayName={preferences.display_name} onClose={() => setActiveView("server")} onError={setError} onFeedback={setFeedback} /></div>}
+      {activeView === "server" && (!activeGroup || !activeChannel ? <EmptyWorkspace onCreate={() => openModal("create")} onJoin={() => openModal("join")} /> : <div className={`workspace-layer ${activeChannel.kind === "voice" ? "voice-layout" : "text-layout"}`}>
         {visibleCallTarget && <div className={`call-stage-host ${callIsVisible ? "full" : "background-call"}`}>{renderCall}</div>}
         <ChatPanel channel={activeChannel} messages={messages} loading={loadingMessages} draft={draft} busy={busy} onDraft={setDraft} onSubmit={handleSubmit} onMessageContextMenu={(event, message) => openContextMenu(event, { kind: "message", groupId: activeGroup.id, channelId: activeChannel.id, messageId: message.id })} />
-      </div>}
+      </div>)}
       <footer className="status-bar"><div className="status-item"><Wifi size={14} /><span>{statusLabel}</span><span className={`status-dot ${nodeStatus === "offline" ? "status-dot-offline" : ""}`} /></div><div className="status-item muted-status">{node.connected_peers} peers próximos <span>·</span> {syncLabel}</div><button onClick={() => openModal("network")} className="network-link">identidade do node <span>{node.peer_id ? `${node.peer_id.slice(0, 12)}…` : "indisponível"}</span></button></footer>
     </main>
 
-      {(error || feedback) && <div className={`toast ${error ? "toast-error" : ""}`} role="status"><span>{error || feedback}</span><button onClick={() => { setError(""); setFeedback(""); }} aria-label="Fechar aviso"><X size={14} /></button></div>}
+      {(error || feedback) && (() => {
+        const notice = error ? formatNotice(error) : { title: "Tudo certo", message: feedback, technicalDetails: undefined, level: "success" as const, transient: false };
+        return <ToastNotice title={notice.title} message={notice.message} technicalDetails={notice.technicalDetails} level={notice.level} onClose={() => { setError(""); setFeedback(""); }} />;
+      })()}
     {contextMenu && <div className="context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}>
       {contextMenu.kind === "server" && <>
         <button role="menuitem" onClick={() => { const group = groups.find((item) => item.id === contextMenu.groupId); if (group) void nodeApi.createInvite(group.id).then((invite) => copyText(invite, "convite do servidor copiado")).catch((reason) => setError(String(reason))); setContextMenu(null); }}><UserPlus size={15} /> Criar link de convite</button>
@@ -578,11 +626,13 @@ function App() {
       </>}
     </div>}
     {modal === "network" && <NetworkModal node={node} diagnostics={networkDiagnostics} checkingDiagnostics={checkingDiagnostics} runDiagnostics={() => void runNetworkDiagnostics()} peerAddress={peerAddress} setPeerAddress={setPeerAddress} connectPeer={connectPeer} relayAddress={relayAddress} setRelayAddress={setRelayAddress} addRelay={addRelay} bootstrapAddress={bootstrapAddress} setBootstrapAddress={setBootstrapAddress} addBootstrap={addBootstrap} mediaConfigText={mediaConfigText} setMediaConfigText={setMediaConfigText} saveMediaConfig={saveMediaConfig} copied={copied} copyPeerId={() => copyText(node.peer_id, "peer id copiado")} onClose={() => setModal(null)} />}
-    {modal === "create" && <div className="modal-backdrop" onClick={() => setModal(null)}><section className="network-modal form-modal" onClick={(event) => event.stopPropagation()}><ModalHeader eyebrow="NOVO SERVIDOR" title="Criar servidor" onClose={() => setModal(null)} />{generatedInvite ? <><p className="modal-note modal-intro">Servidor criado. Compartilhe este convite com seus amigos; ele expira em 30 dias.</p><div className="invite-box"><code>{generatedInvite}</code><button className="connect-button" onClick={() => void copyText(generatedInvite, "convite copiado")}><Copy size={15} /> {copied ? "copiado" : "copiar"}</button></div><button className="primary-button modal-primary" onClick={() => setModal(null)}>concluir</button></> : <form className="modal-form" onSubmit={handleCreateGroup}><label>nome do servidor</label><input autoFocus value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="ex.: Amigos do bairro" maxLength={80} /><button className="primary-button modal-primary" disabled={busy || !groupName.trim()}>{busy ? "criando…" : "criar servidor"}</button></form>}</section></div>}
-    {modal === "join" && <div className="modal-backdrop" onClick={() => setModal(null)}><section className="network-modal form-modal" onClick={(event) => event.stopPropagation()}><ModalHeader eyebrow="ENTRAR EM SERVIDOR" title="Usar convite" onClose={() => setModal(null)} /><form className="modal-form" onSubmit={handleJoinGroup}><label>convite assinado</label><textarea autoFocus value={inviteText} onChange={(event) => setInviteText(event.target.value)} placeholder="cole o convite recebido aqui" rows={5} /><button className="primary-button modal-primary" disabled={busy || !inviteText.trim()}>{busy ? "validando…" : "entrar no servidor"}</button></form><p className="modal-note">O convite é validado localmente e a chave do servidor fica protegida no armazenamento seguro do sistema.</p></section></div>}
+    {modal === "create" && <div className="modal-backdrop" onClick={() => setModal(null)}><section className="network-modal form-modal" onClick={(event) => event.stopPropagation()}><ModalHeader eyebrow="NOVO SERVIDOR" title="Criar servidor" onClose={() => setModal(null)} />{generatedInvite ? <><p className="modal-note modal-intro">Servidor criado. Compartilhe este convite com seus amigos; ele expira em 30 dias.</p><div className="invite-qr-layout">{generatedInviteQr && <img className="invite-qr" src={generatedInviteQr} alt="QR do convite do servidor" />}<div className="invite-box"><code>{generatedInvite}</code><button className="connect-button" onClick={() => void copyText(generatedInvite, "convite copiado")}><Copy size={15} /> {copied ? "copiado" : "copiar"}</button></div></div><button className="primary-button modal-primary" onClick={() => setModal(null)}>concluir</button></> : <form className="modal-form" onSubmit={handleCreateGroup}><label>nome do servidor</label><input autoFocus value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="ex.: Amigos do bairro" maxLength={80} /><button className="primary-button modal-primary" disabled={busy || !groupName.trim()}>{busy ? "criando…" : "criar servidor"}</button></form>}</section></div>}
+    {modal === "invite" && <div className="modal-backdrop" onClick={() => setModal(null)}><section className="network-modal form-modal" onClick={(event) => event.stopPropagation()}><ModalHeader eyebrow="CONVITE ASSINADO" title="Compartilhar servidor" onClose={() => setModal(null)} /><p className="modal-note modal-intro">Este convite é autocontido, assinado e expira em 30 dias.</p><div className="invite-qr-layout">{generatedInviteQr && <img className="invite-qr" src={generatedInviteQr} alt="QR do convite do servidor" />}<div className="invite-box"><code>{generatedInvite}</code><button className="connect-button" onClick={() => void copyText(generatedInvite, "convite copiado")}><Copy size={15} /> {copied ? "copiado" : "copiar"}</button></div></div><button className="primary-button modal-primary" onClick={() => setModal(null)}>fechar</button></section></div>}
+    {modal === "join" && <div className="modal-backdrop" onClick={() => setModal(null)}><section className="network-modal form-modal" onClick={(event) => event.stopPropagation()}><ModalHeader eyebrow="ENTRAR EM SERVIDOR" title="Usar convite" onClose={() => setModal(null)} /><form className="modal-form" onSubmit={handleJoinGroup}><label>convite assinado</label><textarea autoFocus value={inviteText} onChange={(event) => setInviteText(event.target.value)} placeholder="cole o convite recebido aqui" rows={5} /><label className="file-button qr-import-button"><QrCode size={14} /> importar QR do convite<input type="file" accept="image/*" onChange={(event) => void readQrImage(event.target.files?.[0] as File).then(setInviteText).catch((reason) => setError(String(reason)))} /></label><button className="primary-button modal-primary" disabled={busy || !inviteText.trim()}>{busy ? "validando…" : "entrar no servidor"}</button></form><p className="modal-note">O convite é validado localmente e a chave do servidor fica protegida no armazenamento seguro do sistema.</p></section></div>}
     {modal === "create-channel" && activeGroup && <div className="modal-backdrop" onClick={() => setModal(null)}><section className="network-modal form-modal" onClick={(event) => event.stopPropagation()}><ModalHeader eyebrow={activeGroup.name.toUpperCase()} title="Criar canal" onClose={() => setModal(null)} /><form className="modal-form" onSubmit={createChannel}><label>nome do canal</label><input autoFocus value={newChannelName} onChange={(event) => setNewChannelName(event.target.value)} placeholder="ex.: jogos" maxLength={40} /><label>tipo</label><div className="preference-options"><button type="button" className={newChannelKind === "text" ? "selected" : ""} onClick={() => setNewChannelKind("text")}><Hash size={14} /> texto</button><button type="button" className={newChannelKind === "voice" ? "selected" : ""} onClick={() => setNewChannelKind("voice")}><Volume2 size={14} /> voz + chat + tela</button></div><button className="primary-button modal-primary" disabled={!newChannelName.trim()}>criar canal</button></form></section></div>}
-    {modal === "settings" && activeGroup && <GroupSettings group={activeGroup} localPeerId={node.peer_id} onClose={() => setModal(null)} onChanged={async () => { await refreshGroups(); await refreshMembers(activeGroup.id); }} onDeleted={handleGroupDeleted} onFeedback={setFeedback} onError={setError} />}
+    {modal === "settings" && activeGroup && <GroupSettings group={activeGroup} localPeerId={node.peer_id} onClose={() => setModal(null)} onChanged={async () => { await refreshGroups(); await refreshMembers(activeGroup.id); }} onDeleted={handleGroupDeleted} onProfileChange={handleGroupProfileChange} onFeedback={setFeedback} onError={setError} />}
     {modal === "user-settings" && <UserSettings preferences={preferences} onChange={handlePreferences} onClose={() => setModal(null)} />}
+    {modal === "friends" && <FriendsPanel displayName={preferences.display_name} onClose={() => setModal(null)} onError={setError} onFeedback={setFeedback} />}
     {availableUpdate && <UpdateModal update={availableUpdate} onLater={dismissUpdate} />}
   </div>;
 }

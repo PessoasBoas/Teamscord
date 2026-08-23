@@ -1,6 +1,6 @@
 {
   "name": "teamscord",
-  "version": "0.3.2",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "check": "npm run build && npm run test:ui && npm run test:updates && npm run test:media && npm run test:browser && npm run test:browser:screen && cargo fmt --manifest-path src-tauri/Cargo.toml -- --check && cargo fmt --manifest-path infra/relay/Cargo.toml -- --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo clippy --manifest-path infra/relay/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml && cargo test --manifest-path infra/relay/Cargo.toml",
     "release": "npm run build && tauri build --bundles nsis && powershell -ExecutionPolicy Bypass -File scripts/checksum.ps1",
-    "test:ui": "vitest run src/lib/ui-model.test.ts",
+    "test:ui": "vitest run src/lib/ui-model.test.ts src/lib/notice.test.ts src/lib/qr.test.ts",
     "test:updates": "vitest run src/lib/update-checker.test.ts",
     "test:media": "vitest run src/lib/webrtc.test.ts",
     "test:browser": "node scripts/webrtc-browser-smoke.mjs",
@@ -18,7 +18,10 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
+    "@types/qrcode": "^1.5.6",
+    "jsqr": "^1.4.0",
     "lucide-react": "^0.468.0",
+    "qrcode": "^1.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

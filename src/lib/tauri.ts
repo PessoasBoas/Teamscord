@@ -39,6 +39,17 @@ export type ChatMessage = {
   mine: boolean;
 };
 
+export type ContactCard = {
+  peer_id: string;
+  display_name: string;
+  public_key: number[];
+  x25519_public_key: number[];
+  addresses: string[];
+  encoded: string;
+};
+export type Friend = { peer_id: string; display_name: string; status: "pending" | "accepted" | "rejected" | "blocked"; requested_by: string; online: boolean; updated_at: number };
+export type DirectMessage = { id: string; conversation_id: string; from_peer_id: string; to_peer_id: string; author: string; content: string; created_at: number; mine: boolean };
+
 export type NodeSnapshot = {
   peer_id: string;
   listen_addresses: string[];
@@ -59,6 +70,8 @@ export type UserPreferences = {
   font: "manrope" | "system" | "mono";
   scale: "compact" | "comfortable" | "large";
   display_name: string;
+  accent_color?: string;
+  avatar_color?: string;
 };
 export type SearchResult = { kind: "message" | "channel" | "member"; id: string; title: string; subtitle: string; group_id: string; channel_id?: string; created_at?: number };
 export type AppNotification = { id: string; kind: "message" | "member" | "call" | "system"; title: string; body: string; created_at: number; read: boolean; group_id?: string; channel_id?: string };
@@ -115,7 +128,7 @@ export type CallSignal = { event_id: string; group_id: string; channel_id: strin
 export type CallSignalEvent = { signal: Record<string, unknown>; body: { to_peer_id?: string | null; kind: string; payload: Record<string, unknown> } };
 
 export type NodeEvent = {
-  kind: "ready" | "snapshot" | "message" | "error" | "group-control" | "member-updated" | "channel-updated" | "call-signal" | "call-state" | "media-error" | "key-epoch-changed" | "sync-state" | "peer-updated" | "relay-state" | "peer-presence" | "sync-progress" | "connection-diagnostic";
+  kind: "ready" | "snapshot" | "message" | "direct-message" | "friend-updated" | "error" | "group-control" | "member-updated" | "channel-updated" | "call-signal" | "call-state" | "media-error" | "key-epoch-changed" | "sync-state" | "peer-updated" | "relay-state" | "peer-presence" | "sync-progress" | "connection-diagnostic";
   message?: ChatMessage;
   snapshot?: NodeSnapshot;
   error?: string;
@@ -129,6 +142,12 @@ export const nodeApi = {
   getNodeSnapshot: () => invoke<NodeSnapshot>("get_node_snapshot"),
   getNetworkStatus: () => invoke<NetworkStatusView>("get_network_status"),
   getKnownPeers: () => invoke<NodeContact[]>("get_known_peers"),
+  getContactCard: (displayName = "Você") => invoke<ContactCard>("get_contact_card", { displayName }),
+  listFriends: () => invoke<Friend[]>("list_friends"),
+  createFriendRequest: (contact: string, displayName = "Você") => invoke<Friend>("create_friend_request", { contact, displayName }),
+  respondFriendRequest: (peerId: string, response: "accept" | "reject" | "block", displayName = "Você") => invoke<Friend>("respond_friend_request", { peerId, response, displayName }),
+  getDirectMessages: (peerId: string) => invoke<DirectMessage[]>("get_direct_messages", { peerId }),
+  sendDirectMessage: (peerId: string, content: string, displayName = "Você") => invoke<DirectMessage>("send_direct_message", { peerId, content, displayName }),
   runNetworkDiagnostics: () => invoke<NetworkDiagnostics>("run_network_diagnostics"),
   getNetworkConfig: () => invoke<NetworkConfig>("get_network_config"),
   setNetworkConfig: (relayAddresses: string[], bootstrapAddresses: string[] = []) => invoke<NetworkConfig>("set_network_config", { relayAddresses, bootstrapAddresses }),

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowDown, ArrowUp, Copy, Crown, Pencil, Plus, Save, ShieldCheck, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Copy, Crown, Palette, Pencil, Plus, Save, ShieldCheck, Trash2, X } from "lucide-react";
 import {
   nodeApi,
   type AuditEvent,
@@ -18,12 +18,13 @@ type GroupSettingsProps = {
   onClose: () => void;
   onChanged: () => Promise<void>;
   onDeleted: () => Promise<void>;
+  onProfileChange: (group: Group) => void;
   onFeedback: (message: string) => void;
   onError: (message: string) => void;
 };
-type Tab = "overview" | "members" | "roles" | "channels" | "invites" | "audit";
+type Tab = "overview" | "personalization" | "members" | "roles" | "channels" | "invites" | "audit";
 
-export function GroupSettings({ group, localPeerId, onClose, onChanged, onDeleted, onFeedback, onError }: GroupSettingsProps) {
+export function GroupSettings({ group, localPeerId, onClose, onChanged, onDeleted, onProfileChange, onFeedback, onError }: GroupSettingsProps) {
   const [tab, setTab] = useState<Tab>("overview");
   const [members, setMembers] = useState<GroupMember[]>([]);
   const [roles, setRoles] = useState<RoleView[]>([]);
@@ -35,6 +36,9 @@ export function GroupSettings({ group, localPeerId, onClose, onChanged, onDelete
   const [editingChannelName, setEditingChannelName] = useState("");
   const [invite, setInvite] = useState("");
   const [loading, setLoading] = useState(true);
+  const [profileName, setProfileName] = useState(group.name);
+  const [profileInitials, setProfileInitials] = useState(group.initials);
+  const [profileColor, setProfileColor] = useState(group.color);
 
   async function load() {
     setLoading(true);
@@ -57,6 +61,28 @@ export function GroupSettings({ group, localPeerId, onClose, onChanged, onDelete
   }
 
   useEffect(() => { void load(); }, [group.id, group.channels]);
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(`teamscord.group-profile:${group.id}`) ?? "null") as { name?: string; initials?: string; color?: string } | null;
+      setProfileName(saved?.name ?? group.name);
+      setProfileInitials(saved?.initials ?? group.initials);
+      setProfileColor(saved?.color ?? group.color);
+    } catch {
+      setProfileName(group.name);
+      setProfileInitials(group.initials);
+      setProfileColor(group.color);
+    }
+  }, [group.id, group.name, group.initials, group.color]);
+
+  function saveProfile() {
+    const name = profileName.trim().slice(0, 80) || group.name;
+    const initials = profileInitials.trim().slice(0, 3).toUpperCase() || group.initials;
+    const color = /^#[0-9a-f]{6}$/i.test(profileColor) ? profileColor : group.color;
+    const next = { ...group, name, initials, color };
+    localStorage.setItem(`teamscord.group-profile:${group.id}`, JSON.stringify({ name, initials, color }));
+    onProfileChange(next);
+    onFeedback("aparência do grupo salva neste dispositivo");
+  }
 
   async function action(run: () => Promise<unknown>, success: string) {
     try {
@@ -142,7 +168,7 @@ export function GroupSettings({ group, localPeerId, onClose, onChanged, onDelete
   }
 
   const labels: Record<Tab, string> = {
-    overview: "Visão geral", members: "Membros", roles: "Cargos e permissões",
+    overview: "Visão geral", personalization: "Personalização", members: "Membros", roles: "Cargos e permissões",
     channels: "Canais", invites: "Convites", audit: "Log de auditoria",
   };
   const localMember = members.find((member) => member.peer_id === localPeerId);
@@ -166,9 +192,9 @@ export function GroupSettings({ group, localPeerId, onClose, onChanged, onDelete
     <section className="settings-modal" onClick={(event) => event.stopPropagation()}>
       <header className="settings-header"><div><span className="eyebrow">CONTROLE DO GRUPO</span><h2>{group.name}</h2><p>Owner, Admin, Mod e Member · eventos assinados</p></div><button className="icon-button" onClick={onClose} aria-label="Fechar configurações"><X size={19} /></button></header>
       <div className="settings-layout">
-        <nav className="settings-tabs" aria-label="Configurações do grupo">{(Object.keys(labels) as Tab[]).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{labels[item]}</button>)}</nav>
+        <nav className="settings-tabs" aria-label="Configurações do grupo">{(Object.keys(labels) as Tab[]).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "personalization" && <Palette size={14} />}{labels[item]}</button>)}</nav>
         <div className="settings-content">
-          {loading ? <div className="loading-state">carregando controles…</div> : tab === "overview" ? <Overview members={members} channels={group.channels.length} audit={audit.length} isOwner={localPeerId === group.owner_peer_id} onDelete={deleteGroup} /> : tab === "members" ? <div className="settings-list">{members.map((member) => <article className="member-admin-row" key={member.peer_id}><span className="avatar small avatar-purple">{member.display_name.slice(0, 2).toUpperCase()}</span><div><strong>{member.display_name}</strong><small>{member.peer_id.slice(0, 18)}… · {member.status}</small></div>{member.role === "owner" ? <span className="role-badge">owner</span> : canManageRoles && canManageTarget(member.role) ? <select value={member.role} onChange={(event) => void changeRole(member, event.target.value as Role)}>{roleOptions(member.role).map((role) => <option key={role} value={role}>{role}</option>)}</select> : <span className="role-badge">{member.role}</span>}<div className="member-actions">{localPeerId === group.owner_peer_id && member.status === "active" && member.role !== "owner" && <button onClick={() => void transferOwnership(member)}><Crown size={12} /> Owner</button>}{member.status === "banned" ? canManageMembers && canManageTarget(member.role) && <button onClick={() => void moderate(member, "unban")}>desbanir</button> : member.status === "active" && canModerate && canManageTarget(member.role) ? <><button onClick={() => void moderate(member, "timeout")}>timeout</button><button onClick={() => void moderate(member, "kick")}>expulsar</button><button className="danger-text" onClick={() => void moderate(member, "ban")}>banir</button></> : null}</div></article>)}{!members.length && <div className="empty-state">Nenhum membro sincronizado.</div>}</div> : tab === "roles" ? <div className="roles-list">{roles.map((role) => <article key={role.role}><div><strong>{role.role}</strong><span>{role.permissions.length} permissões</span></div><p>{role.permissions.map((permission: Permission) => permission.replace(/_/g, " ")).join(" · ")}</p></article>)}</div> : tab === "channels" ? <div className="settings-list">{canManageChannels && <div className="inline-form"><input value={channelName} onChange={(event) => setChannelName(event.target.value)} placeholder="nome do novo canal" /><select value={channelKind} onChange={(event) => setChannelKind(event.target.value as Channel["kind"])} aria-label="Tipo do novo canal"><option value="text">texto</option><option value="voice">voz</option></select><button className="connect-button" onClick={() => void createChannel()}><Plus size={15} /> criar</button></div>}{group.channels.map((channel, index) => <article className="channel-admin-row" key={channel.id}>{editingChannelId === channel.id ? <input className="channel-name-edit" autoFocus value={editingChannelName} onChange={(event) => setEditingChannelName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void updateChannel(channel); if (event.key === "Escape") setEditingChannelId(null); }} /> : <span>{channel.kind === "text" ? "#" : "◉"} {channel.name}</span>}<small>{channel.kind === "voice" ? "voz + chat + tela" : "texto"}</small>{canManageChannels && (editingChannelId === channel.id ? <button className="icon-button" onClick={() => void updateChannel(channel)} aria-label={`Salvar ${channel.name}`}><Save size={16} /></button> : <button className="icon-button" onClick={() => { setEditingChannelId(channel.id); setEditingChannelName(channel.name); }} aria-label={`Editar ${channel.name}`}><Pencil size={16} /></button>)}{canManageChannels && <><button className="icon-button" disabled={index === 0} onClick={() => void moveChannel(index, -1)} aria-label={`Mover ${channel.name} para cima`}><ArrowUp size={15} /></button><button className="icon-button" disabled={index === group.channels.length - 1} onClick={() => void moveChannel(index, 1)} aria-label={`Mover ${channel.name} para baixo`}><ArrowDown size={15} /></button><button className="icon-button danger-text" onClick={() => void deleteChannel(channel)} aria-label={`Excluir ${channel.name}`}><Trash2 size={16} /></button></>}</article>)}</div> : tab === "invites" ? <div className="invite-settings"><p>Convites assinados expiram e não carregam credenciais TURN.</p>{canManageMembers && <button className="primary-button" onClick={() => void createInvite()}>criar convite</button>}{!canManageMembers && <div className="empty-state">Somente Owner e Admin podem criar convites.</div>}{invite && <div className="invite-box"><code>{invite}</code><button className="connect-button" onClick={() => { void navigator.clipboard?.writeText(invite); onFeedback("convite copiado"); }}><Copy size={15} /> copiar</button></div>}</div> : <div className="audit-list">{audit.map((event) => <article key={event.event_id}><span className="audit-kind">{event.kind}</span><span>{event.issuer_peer_id.slice(0, 12)}…</span><time>{new Date(event.logical_timestamp).toLocaleString("pt-BR")}</time></article>)}{!audit.length && <div className="empty-state">Nenhum evento administrativo.</div>}</div>}
+          {loading ? <div className="loading-state">carregando controles…</div> : tab === "overview" ? <Overview members={members} channels={group.channels.length} audit={audit.length} isOwner={localPeerId === group.owner_peer_id} onDelete={deleteGroup} /> : tab === "personalization" ? <div className="group-personalization"><div className="group-personalization-preview" style={{ background: profileColor }}><strong>{profileInitials || "TC"}</strong><span>{profileName || group.name}</span></div><div className="preference-section"><h3>Perfil do grupo</h3><p>Essa aparência é salva neste dispositivo para este grupo.</p><label>nome exibido<input value={profileName} maxLength={80} onChange={(event) => setProfileName(event.target.value)} /></label><label>iniciais<input value={profileInitials} maxLength={3} onChange={(event) => setProfileInitials(event.target.value.toUpperCase())} /></label><label>cor principal<input type="color" value={profileColor} onChange={(event) => setProfileColor(event.target.value)} /></label><button className="primary-button" onClick={saveProfile}>salvar aparência</button></div></div> : tab === "members" ? <div className="settings-list">{members.map((member) => <article className="member-admin-row" key={member.peer_id}><span className="avatar small avatar-purple">{member.display_name.slice(0, 2).toUpperCase()}</span><div><strong>{member.display_name}</strong><small>{member.peer_id.slice(0, 18)}… · {member.status}</small></div>{member.role === "owner" ? <span className="role-badge">owner</span> : canManageRoles && canManageTarget(member.role) ? <select value={member.role} onChange={(event) => void changeRole(member, event.target.value as Role)}>{roleOptions(member.role).map((role) => <option key={role} value={role}>{role}</option>)}</select> : <span className="role-badge">{member.role}</span>}<div className="member-actions">{localPeerId === group.owner_peer_id && member.status === "active" && member.role !== "owner" && <button onClick={() => void transferOwnership(member)}><Crown size={12} /> Owner</button>}{member.status === "banned" ? canManageMembers && canManageTarget(member.role) && <button onClick={() => void moderate(member, "unban")}>desbanir</button> : member.status === "active" && canModerate && canManageTarget(member.role) ? <><button onClick={() => void moderate(member, "timeout")}>timeout</button><button onClick={() => void moderate(member, "kick")}>expulsar</button><button className="danger-text" onClick={() => void moderate(member, "ban")}>banir</button></> : null}</div></article>)}{!members.length && <div className="empty-state">Nenhum membro sincronizado.</div>}</div> : tab === "roles" ? <div className="roles-list">{roles.map((role) => <article key={role.role}><div><strong>{role.role}</strong><span>{role.permissions.length} permissões</span></div><p>{role.permissions.map((permission: Permission) => permission.replace(/_/g, " ")).join(" · ")}</p></article>)}</div> : tab === "channels" ? <div className="settings-list">{canManageChannels && <div className="inline-form"><input value={channelName} onChange={(event) => setChannelName(event.target.value)} placeholder="nome do novo canal" /><select value={channelKind} onChange={(event) => setChannelKind(event.target.value as Channel["kind"])} aria-label="Tipo do novo canal"><option value="text">texto</option><option value="voice">voz</option></select><button className="connect-button" onClick={() => void createChannel()}><Plus size={15} /> criar</button></div>}{group.channels.map((channel, index) => <article className="channel-admin-row" key={channel.id}>{editingChannelId === channel.id ? <input className="channel-name-edit" autoFocus value={editingChannelName} onChange={(event) => setEditingChannelName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void updateChannel(channel); if (event.key === "Escape") setEditingChannelId(null); }} /> : <span>{channel.kind === "text" ? "#" : "◉"} {channel.name}</span>}<small>{channel.kind === "voice" ? "voz + chat + tela" : "texto"}</small>{canManageChannels && (editingChannelId === channel.id ? <button className="icon-button" onClick={() => void updateChannel(channel)} aria-label={`Salvar ${channel.name}`}><Save size={16} /></button> : <button className="icon-button" onClick={() => { setEditingChannelId(channel.id); setEditingChannelName(channel.name); }} aria-label={`Editar ${channel.name}`}><Pencil size={16} /></button>)}{canManageChannels && <><button className="icon-button" disabled={index === 0} onClick={() => void moveChannel(index, -1)} aria-label={`Mover ${channel.name} para cima`}><ArrowUp size={15} /></button><button className="icon-button" disabled={index === group.channels.length - 1} onClick={() => void moveChannel(index, 1)} aria-label={`Mover ${channel.name} para baixo`}><ArrowDown size={15} /></button><button className="icon-button danger-text" onClick={() => void deleteChannel(channel)} aria-label={`Excluir ${channel.name}`}><Trash2 size={16} /></button></>}</article>)}</div> : tab === "invites" ? <div className="invite-settings"><p>Convites assinados expiram e não carregam credenciais TURN.</p>{canManageMembers && <button className="primary-button" onClick={() => void createInvite()}>criar convite</button>}{!canManageMembers && <div className="empty-state">Somente Owner e Admin podem criar convites.</div>}{invite && <div className="invite-box"><code>{invite}</code><button className="connect-button" onClick={() => { void navigator.clipboard?.writeText(invite); onFeedback("convite copiado"); }}><Copy size={15} /> copiar</button></div>}</div> : <div className="audit-list">{audit.map((event) => <article key={event.event_id}><span className="audit-kind">{event.kind}</span><span>{event.issuer_peer_id.slice(0, 12)}…</span><time>{new Date(event.logical_timestamp).toLocaleString("pt-BR")}</time></article>)}{!audit.length && <div className="empty-state">Nenhum evento administrativo.</div>}</div>}
           {!loading && tab === "channels" && <div className="channel-permission-stack"><p className="modal-note">Permissões por canal; desative a entrada ou o compartilhamento para qualquer cargo.</p>{group.channels.filter((channel) => channel.kind === "voice").map((channel) => <ChannelPermissionEditor key={channel.id} permissions={channelPermissions[channel.id] ?? []} disabled={!canManageChannels} onChange={(permission, field, value) => void updateChannelPermission(permission, field, value)} />)}</div>}
         </div>
       </div>

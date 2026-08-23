@@ -1,4 +1,7 @@
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
+    Engine,
+};
 use chacha20poly1305::{
     aead::{Aead, Payload},
     KeyInit, XChaCha20Poly1305, XNonce,
@@ -24,20 +27,20 @@ pub struct InvitePayload {
     pub color: String,
     pub owner_peer_id: String,
     pub owner_public_key: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_x25519_public_key: Option<String>,
     pub group_key: String,
     #[serde(default = "default_key_epoch")]
     pub key_epoch: i64,
     pub expires_at: i64,
     pub signature: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer_peer_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer_public_key: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer_signature: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contact_addresses: Vec<String>,
 }
 
@@ -193,12 +196,17 @@ pub fn decrypt_message(
 pub fn encode_invite(payload: &InvitePayload) -> Result<String, String> {
     let bytes =
         serde_json::to_vec(payload).map_err(|error| format!("convite inválido: {error}"))?;
-    Ok(BASE64.encode(bytes))
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 pub fn decode_invite(invite: &str) -> Result<InvitePayload, String> {
-    let bytes = BASE64
-        .decode(invite.trim())
+    let trimmed = invite
+        .trim()
+        .strip_prefix("teamscord://invite/v1/")
+        .unwrap_or(invite.trim());
+    let bytes = URL_SAFE_NO_PAD
+        .decode(trimmed)
+        .or_else(|_| BASE64.decode(trimmed))
         .map_err(|error| format!("convite não é base64 válido: {error}"))?;
     serde_json::from_slice(&bytes).map_err(|error| format!("convite inválido: {error}"))
 }

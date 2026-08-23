@@ -48,13 +48,14 @@ use crate::{
         X25519_KEY_BYTES,
     },
     protocol::{
-        aad_for_envelope, signing_bytes, CallSignal, CallSignalBody, MessageEnvelope,
-        PresenceAnnouncement, PresenceCall, SyncRequest, SyncResponse, CALL_SIGNAL_PROTOCOL,
-        PRESENCE_PROTOCOL, SYNC_PROTOCOL,
+        aad_for_envelope, contact_card_signing_bytes, direct_aad, direct_signing_bytes,
+        signing_bytes, CallSignal, CallSignalBody, ContactCard, DirectBody, DirectEnvelope,
+        MessageEnvelope, PresenceAnnouncement, PresenceCall, SyncRequest, SyncResponse,
+        CALL_SIGNAL_PROTOCOL, DIRECT_PROTOCOL, PRESENCE_PROTOCOL, SYNC_PROTOCOL,
     },
     storage::{
-        AuditEventRecord, ChannelPermissionRecord, ChannelRecord, Database, GroupRecord,
-        MemberRecord,
+        AuditEventRecord, ChannelPermissionRecord, ChannelRecord, ContactRecord, Database,
+        DirectMessageRecord, GroupRecord, MemberRecord,
     },
 };
 
@@ -118,6 +119,38 @@ pub struct ChatMessage {
     pub color: String,
     pub content: String,
     pub timestamp: String,
+    pub created_at: i64,
+    pub mine: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContactCardView {
+    pub peer_id: String,
+    pub display_name: String,
+    pub public_key: Vec<u8>,
+    pub x25519_public_key: Vec<u8>,
+    pub addresses: Vec<String>,
+    pub encoded: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FriendView {
+    pub peer_id: String,
+    pub display_name: String,
+    pub status: String,
+    pub requested_by: String,
+    pub online: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DirectMessageView {
+    pub id: String,
+    pub conversation_id: String,
+    pub from_peer_id: String,
+    pub to_peer_id: String,
+    pub author: String,
+    pub content: String,
     pub created_at: i64,
     pub mine: bool,
 }
@@ -247,6 +280,7 @@ enum NodeCommand {
     Publish { envelope: Box<MessageEnvelope> },
     PublishControl { event: Box<ControlEvent> },
     PublishCall { signal: Box<CallSignal> },
+    PublishDirect { envelope: Box<DirectEnvelope> },
     SubscribeGroup { group_id: String },
     RequestSync,
     BroadcastPresence,
@@ -319,6 +353,7 @@ struct Behaviour {
     sync: request_response::json::Behaviour<SyncRequest, SyncResponse>,
     call_signal: request_response::json::Behaviour<CallSignal, CallSignal>,
     presence: request_response::json::Behaviour<PresenceAnnouncement, PresenceAnnouncement>,
+    direct: request_response::json::Behaviour<DirectEnvelope, DirectEnvelope>,
 }
 
 #[tauri::command]
@@ -408,6 +443,228 @@ fn get_known_peers(state: State<'_, NodeState>) -> Result<Vec<NodeContact>, Stri
         entry.last_seen = entry.last_seen.max(record.last_seen);
     }
     Ok(grouped.into_values().collect())
+}
+
+#[tauri::command]
+fn get_contact_card(
+    display_name: Option<String>,
+    state: State<'_, NodeState>,
+) -> Result<ContactCardView, String> {
+    let card = local_contact_card(&state, display_name.as_deref().unwrap_or("Você"))?;
+    let encoded = encode_contact_card(&card)?;
+    Ok(ContactCardView {
+        peer_id: card.peer_id,
+        display_name: card.display_name,
+        public_key: card.public_key,
+        x25519_public_key: card.x25519_public_key,
+        addresses: card.addresses,
+        encoded: format!("teamscord://contact/v1/{encoded}"),
+    })
+}
+
+#[tauri::command]
+fn list_friends(state: State<'_, NodeState>) -> Result<Vec<FriendView>, String> {
+    let contacts = state.database.list_contacts(None)?;
+    Ok(contacts
+        .into_iter()
+        .map(|contact| friend_view(&state, contact))
+        .collect())
+}
+
+#[tauri::command]
+fn create_friend_request(
+    contact: String,
+    display_name: Option<String>,
+    app: AppHandle,
+    state: State<'_, NodeState>,
+) -> Result<FriendView, String> {
+    let card = decode_contact_card(&contact)?;
+    let local = ensure_keypair(&state)?;
+    let local_peer_id = local.public().to_peer_id().to_string();
+    if card.peer_id == local_peer_id {
+        return Err("não é possível adicionar a própria identidade".into());
+    }
+    validate_contact_card(&card)?;
+    for address in &card.addresses {
+        if let Ok(address) = address.parse::<Multiaddr>() {
+            let _ = state.database.remember_peer_address(
+                &card.peer_id,
+                address.to_string().as_str(),
+                "contact",
+                now_millis(),
+            );
+            if let Ok(sender) = state.command_tx.lock() {
+                if let Some(sender) = sender.clone() {
+                    let _ = sender.send(NodeCommand::Dial {
+                        address: peer_dial_address(
+                            address,
+                            &card
+                                .peer_id
+                                .parse()
+                                .map_err(|_| "peer id do contato inválido")?,
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    let existing = state.database.get_contact(&card.peer_id)?;
+    if existing
+        .as_ref()
+        .is_some_and(|contact| contact.status == "blocked")
+    {
+        return Err("este contato está bloqueado".into());
+    }
+    let now = now_millis();
+    let requested_by = "local";
+    state.database.upsert_contact(&ContactRecord {
+        peer_id: card.peer_id.clone(),
+        display_name: card.display_name.clone(),
+        public_key: card.public_key.clone(),
+        x25519_public_key: card.x25519_public_key.clone(),
+        status: "pending".into(),
+        requested_by: requested_by.into(),
+        created_at: existing
+            .as_ref()
+            .map(|contact| contact.created_at)
+            .unwrap_or(now),
+        updated_at: now,
+        last_seen: now,
+    })?;
+    let envelope = new_direct_envelope(
+        &state,
+        &card,
+        "friend_request",
+        DirectBody {
+            request_id: Uuid::new_v4().to_string(),
+            conversation_id: String::new(),
+            display_name: Some(display_name.clone().unwrap_or_else(|| "Você".into())),
+            contact_card: Some(local_contact_card(
+                &state,
+                display_name.as_deref().unwrap_or("Você"),
+            )?),
+            content: None,
+        },
+    )?;
+    enqueue_and_publish_direct(&app, &state, envelope)?;
+    state
+        .database
+        .get_contact(&card.peer_id)?
+        .map(|contact| friend_view(&state, contact))
+        .ok_or_else(|| "contato não foi salvo".into())
+}
+
+#[tauri::command]
+fn respond_friend_request(
+    peer_id: String,
+    response: String,
+    display_name: Option<String>,
+    app: AppHandle,
+    state: State<'_, NodeState>,
+) -> Result<FriendView, String> {
+    let contact = state
+        .database
+        .get_contact(&peer_id)?
+        .ok_or("solicitação de amizade não encontrada")?;
+    let next_status = match response.as_str() {
+        "accept" => "accepted",
+        "reject" => "rejected",
+        "block" => "blocked",
+        _ => return Err("resposta de amizade inválida".into()),
+    };
+    let local_card = local_contact_card(&state, display_name.as_deref().unwrap_or("Você"))?;
+    let now = now_millis();
+    state.database.upsert_contact(&ContactRecord {
+        status: next_status.into(),
+        updated_at: now,
+        last_seen: now,
+        ..contact.clone()
+    })?;
+    let envelope = new_direct_envelope(
+        &state,
+        &contact_to_card(&contact),
+        match next_status {
+            "accepted" => "friend_accept",
+            "rejected" => "friend_reject",
+            _ => "friend_block",
+        },
+        DirectBody {
+            request_id: Uuid::new_v4().to_string(),
+            conversation_id: String::new(),
+            display_name: Some(local_card.display_name.clone()),
+            contact_card: Some(local_card),
+            content: None,
+        },
+    )?;
+    enqueue_and_publish_direct(&app, &state, envelope)?;
+    Ok(friend_view(
+        &state,
+        ContactRecord {
+            status: next_status.into(),
+            updated_at: now,
+            last_seen: now,
+            ..contact
+        },
+    ))
+}
+
+#[tauri::command]
+fn get_direct_messages(
+    peer_id: String,
+    state: State<'_, NodeState>,
+) -> Result<Vec<DirectMessageView>, String> {
+    let local_peer_id = ensure_keypair(&state)?.public().to_peer_id().to_string();
+    state
+        .database
+        .get_contact(&peer_id)?
+        .ok_or("contato não encontrado")?;
+    let conversation_id = conversation_id_for(&local_peer_id, &peer_id);
+    state
+        .database
+        .list_direct_messages(&conversation_id, 200)?
+        .into_iter()
+        .map(|message| direct_message_view(&state, message))
+        .collect()
+}
+
+#[tauri::command]
+fn send_direct_message(
+    peer_id: String,
+    content: String,
+    display_name: Option<String>,
+    app: AppHandle,
+    state: State<'_, NodeState>,
+) -> Result<DirectMessageView, String> {
+    let content = content.trim().to_string();
+    if content.is_empty() || content.len() > 8_000 {
+        return Err("mensagem privada vazia ou grande demais".into());
+    }
+    let contact = state
+        .database
+        .get_contact(&peer_id)?
+        .ok_or("contato não encontrado")?;
+    if contact.status != "accepted" {
+        return Err("aceite a amizade antes de enviar mensagens privadas".into());
+    }
+    let local_peer_id = ensure_keypair(&state)?.public().to_peer_id().to_string();
+    let conversation_id = conversation_id_for(&local_peer_id, &peer_id);
+    let envelope = new_direct_envelope(
+        &state,
+        &contact_to_card(&contact),
+        "direct_message",
+        DirectBody {
+            request_id: Uuid::new_v4().to_string(),
+            conversation_id: conversation_id.clone(),
+            display_name,
+            contact_card: None,
+            content: Some(content),
+        },
+    )?;
+    let record = direct_record(&envelope);
+    state.database.insert_direct_message(&record)?;
+    let view = direct_message_view(&state, record)?;
+    enqueue_and_publish_direct(&app, &state, envelope)?;
+    Ok(view)
 }
 
 #[tauri::command]
@@ -2856,7 +3113,7 @@ async fn run_node(
     )
     .map_err(|error| format!("GossipSub indisponível: {error}"))?;
     let identify = identify::Behaviour::new(identify::Config::new(
-        "/teamscord/0.3.0".into(),
+        "/teamscord/1.0.0".into(),
         keypair.public(),
     ));
     let ping = ping::Behaviour::new(ping::Config::new());
@@ -2881,6 +3138,11 @@ async fn run_node(
         request_response::Config::default()
             .with_request_timeout(std::time::Duration::from_secs(10)),
     );
+    let direct = request_response::json::Behaviour::new(
+        [(StreamProtocol::new(DIRECT_PROTOCOL), ProtocolSupport::Full)],
+        request_response::Config::default()
+            .with_request_timeout(std::time::Duration::from_secs(15)),
+    );
     let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), keypair.public().to_peer_id())
         .map_err(|error| format!("mDNS indisponível: {error}"))?;
     let mut swarm: Swarm<Behaviour> = SwarmBuilder::with_existing_identity(keypair)
@@ -2903,6 +3165,7 @@ async fn run_node(
             sync,
             call_signal,
             presence,
+            direct,
         })
         .expect("comportamento P2P deveria ser construído sem erro")
         .build();
@@ -2967,6 +3230,8 @@ async fn run_node(
     );
     let mut presence_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
     presence_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut outbox_retry = tokio::time::interval(std::time::Duration::from_secs(5));
+    outbox_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = presence_heartbeat.tick() => {
@@ -2974,6 +3239,11 @@ async fn run_node(
                     for peer_id in swarm.connected_peers().copied().collect::<Vec<_>>() {
                         swarm.behaviour_mut().presence.send_request(&peer_id, announcement.clone());
                     }
+                }
+            }
+            _ = outbox_retry.tick() => {
+                if let Err(error) = flush_outbox(&mut swarm, &state, &app) {
+                    emit_error(&app, error);
                 }
             }
             Some(command) = command_rx.recv() => match command {
@@ -3036,6 +3306,17 @@ async fn run_node(
                             .behaviour_mut()
                             .call_signal
                             .send_request(&peer_id, signal.clone());
+                    }
+                }
+                NodeCommand::PublishDirect { envelope } => {
+                    let envelope = *envelope;
+                    if let Ok(peer_id) = envelope.to_peer_id.parse::<PeerId>() {
+                        if swarm.connected_peers().any(|connected| connected == &peer_id) {
+                            swarm.behaviour_mut().direct.send_request(&peer_id, envelope.clone());
+                            let _ = state.database.remove_outbox(&envelope.event_id);
+                        } else {
+                            let _ = state.database.mark_outbox_attempt(&envelope.event_id, now_millis());
+                        }
                     }
                 }
             },
@@ -3158,6 +3439,23 @@ async fn run_node(
                         }
                     }
                 }
+                SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic })) => {
+                    swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                    if topic.as_str().starts_with("teamscord/") {
+                        if let Err(error) = flush_outbox(&mut swarm, &state, &app) {
+                            emit_error(&app, error);
+                        }
+                        emit_network_event(
+                            &app,
+                            "gossip-subscription",
+                            serde_json::json!({
+                                "peer_id": peer_id.to_string(),
+                                "topic": topic.as_str(),
+                                "state": "ready",
+                            }),
+                        );
+                    }
+                }
                 SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message { message, .. })) => {
                     let topic = message.topic.as_str();
                     if topic.starts_with("teamscord/channel/") {
@@ -3242,7 +3540,23 @@ async fn run_node(
                         }
                     }
                 },
-                SwarmEvent::Behaviour(BehaviourEvent::Presence(request_response::Event::OutboundFailure { error, .. })) => emit_error(&app, format!("presença não entregue: {error}")),
+                SwarmEvent::Behaviour(BehaviourEvent::Presence(request_response::Event::OutboundFailure { peer, error, .. })) => emit_presence_transport_issue(&app, &peer, error),
+                SwarmEvent::Behaviour(BehaviourEvent::Direct(request_response::Event::Message { message, .. })) => match message {
+                    request_response::Message::Request { request, channel, .. } => {
+                        if let Err(error) = process_direct_envelope(&app, &state, request.clone()) {
+                            emit_error(&app, error);
+                        }
+                        let _ = swarm.behaviour_mut().direct.send_response(channel, request);
+                    }
+                    request_response::Message::Response { response, .. } => {
+                        if let Err(error) = process_direct_envelope(&app, &state, response) {
+                            emit_error(&app, error);
+                        }
+                    }
+                },
+                SwarmEvent::Behaviour(BehaviourEvent::Direct(request_response::Event::OutboundFailure { error, .. })) => {
+                    emit_network_event(&app, "friend-updated", serde_json::json!({ "state": "reconnecting", "detail": error.to_string() }));
+                }
                 _ => {}
             }
         }
@@ -3281,6 +3595,38 @@ fn emit_network_event(app: &AppHandle, kind: &str, data: serde_json::Value) {
             error: None,
             data: Some(data),
         },
+    );
+}
+
+fn emit_presence_transport_issue(
+    app: &AppHandle,
+    peer_id: &PeerId,
+    error: request_response::OutboundFailure,
+) {
+    let technical_details = error.to_string();
+    emit_network_event(
+        app,
+        "peer-presence",
+        serde_json::json!({
+            "peer_id": peer_id.to_string(),
+            "state": "reconnecting",
+            "last_seen": now_millis(),
+            "source": "presence",
+            "retryable": true,
+            "technical_details": technical_details,
+        }),
+    );
+    emit_network_event(
+        app,
+        "connection-diagnostic",
+        serde_json::json!({
+            "peer_id": peer_id.to_string(),
+            "state": "reconnecting",
+            "detail": "a entrega de presença falhou; o heartbeat tentará novamente",
+            "technical_details": technical_details,
+            "retryable": true,
+            "checked_at": now_millis(),
+        }),
     );
 }
 
@@ -3334,6 +3680,370 @@ fn contact_addresses(state: &NodeState) -> Vec<String> {
         }
     }
     addresses.into_iter().collect()
+}
+
+fn local_contact_card(state: &NodeState, display_name: &str) -> Result<ContactCard, String> {
+    let keypair = ensure_keypair(state)?;
+    let (secret, public) = ensure_agreement_keypair()?;
+    let peer_id = keypair.public().to_peer_id().to_string();
+    let safe_name = display_name.trim().chars().take(64).collect::<String>();
+    let mut card = ContactCard {
+        version: 1,
+        peer_id,
+        display_name: if safe_name.is_empty() {
+            "Você".into()
+        } else {
+            safe_name
+        },
+        public_key: keypair.public().encode_protobuf(),
+        x25519_public_key: public.to_vec(),
+        addresses: contact_addresses(state),
+        created_at: now_millis(),
+        signature: Vec::new(),
+    };
+    let _ = secret;
+    card.signature = keypair
+        .sign(&contact_card_signing_bytes(&card)?)
+        .map_err(|error| format!("não foi possível assinar cartão de contato: {error}"))?;
+    Ok(card)
+}
+
+fn encode_contact_card(card: &ContactCard) -> Result<String, String> {
+    let bytes =
+        serde_json::to_vec(card).map_err(|error| format!("cartão de contato inválido: {error}"))?;
+    Ok(BASE64.encode(bytes))
+}
+
+fn decode_contact_card(value: &str) -> Result<ContactCard, String> {
+    let trimmed = value.trim();
+    let encoded = trimmed
+        .strip_prefix("teamscord://contact/v1/")
+        .unwrap_or(trimmed);
+    let bytes = BASE64
+        .decode(encoded)
+        .map_err(|error| format!("código de contato inválido: {error}"))?;
+    let card: ContactCard = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("cartão de contato inválido: {error}"))?;
+    validate_contact_card(&card)?;
+    Ok(card)
+}
+
+fn validate_contact_card(card: &ContactCard) -> Result<(), String> {
+    if card.version != 1 || card.x25519_public_key.len() != X25519_KEY_BYTES {
+        return Err("cartão de contato incompatível".into());
+    }
+    let public_key = libp2p::identity::PublicKey::try_decode_protobuf(&card.public_key)
+        .map_err(|error| format!("chave pública de contato inválida: {error}"))?;
+    if public_key.to_peer_id().to_string() != card.peer_id {
+        return Err("cartão de contato não corresponde ao PeerId".into());
+    }
+    if !public_key.verify(&contact_card_signing_bytes(card)?, &card.signature) {
+        return Err("assinatura do cartão de contato inválida".into());
+    }
+    if now_millis().saturating_sub(card.created_at).abs() > 90 * 24 * 60 * 60 * 1_000 {
+        return Err("cartão de contato expirado".into());
+    }
+    Ok(())
+}
+
+fn contact_to_card(contact: &ContactRecord) -> ContactCard {
+    ContactCard {
+        version: 1,
+        peer_id: contact.peer_id.clone(),
+        display_name: contact.display_name.clone(),
+        public_key: contact.public_key.clone(),
+        x25519_public_key: contact.x25519_public_key.clone(),
+        addresses: Vec::new(),
+        created_at: contact.updated_at,
+        signature: Vec::new(),
+    }
+}
+
+fn conversation_id_for(left: &str, right: &str) -> String {
+    let mut peers = [left, right];
+    peers.sort_unstable();
+    format!("dm:{}:{}", peers[0], peers[1])
+}
+
+fn new_direct_envelope(
+    state: &NodeState,
+    recipient: &ContactCard,
+    kind: &str,
+    body: DirectBody,
+) -> Result<DirectEnvelope, String> {
+    let keypair = ensure_keypair(state)?;
+    let (secret, public) = ensure_agreement_keypair()?;
+    let mut envelope = DirectEnvelope {
+        event_id: Uuid::new_v4().to_string(),
+        kind: kind.into(),
+        from_peer_id: keypair.public().to_peer_id().to_string(),
+        from_public_key: keypair.public().encode_protobuf(),
+        from_x25519_public_key: public.to_vec(),
+        to_peer_id: recipient.peer_id.clone(),
+        created_at: now_millis(),
+        nonce: Vec::new(),
+        ciphertext: Vec::new(),
+        signature: Vec::new(),
+    };
+    let plaintext =
+        serde_json::to_vec(&body).map_err(|error| format!("mensagem direta inválida: {error}"))?;
+    let (nonce, ciphertext) = encrypt_for_recipient(
+        &secret,
+        &recipient.x25519_public_key,
+        &plaintext,
+        &direct_aad(&envelope)?,
+    )?;
+    envelope.nonce = nonce;
+    envelope.ciphertext = ciphertext;
+    envelope.signature = keypair
+        .sign(&direct_signing_bytes(&envelope)?)
+        .map_err(|error| format!("não foi possível assinar mensagem direta: {error}"))?;
+    Ok(envelope)
+}
+
+fn direct_record(envelope: &DirectEnvelope) -> DirectMessageRecord {
+    DirectMessageRecord {
+        event_id: envelope.event_id.clone(),
+        conversation_id: conversation_id_for(&envelope.from_peer_id, &envelope.to_peer_id),
+        from_peer_id: envelope.from_peer_id.clone(),
+        to_peer_id: envelope.to_peer_id.clone(),
+        from_public_key: envelope.from_public_key.clone(),
+        from_x25519_public_key: envelope.from_x25519_public_key.clone(),
+        created_at: envelope.created_at,
+        nonce: envelope.nonce.clone(),
+        ciphertext: envelope.ciphertext.clone(),
+        signature: envelope.signature.clone(),
+    }
+}
+
+fn decrypt_direct_body(
+    _state: &NodeState,
+    envelope: &DirectEnvelope,
+) -> Result<DirectBody, String> {
+    let (secret, _) = ensure_agreement_keypair()?;
+    let plaintext = decrypt_from_sender(
+        &secret,
+        &envelope.from_x25519_public_key,
+        &envelope.nonce,
+        &envelope.ciphertext,
+        &direct_aad(envelope)?,
+    )?;
+    serde_json::from_slice(&plaintext).map_err(|error| format!("mensagem direta inválida: {error}"))
+}
+
+fn friend_view(_state: &NodeState, contact: ContactRecord) -> FriendView {
+    FriendView {
+        peer_id: contact.peer_id,
+        display_name: contact.display_name,
+        status: contact.status,
+        requested_by: contact.requested_by,
+        online: now_millis().saturating_sub(contact.last_seen) < 45_000,
+        updated_at: contact.updated_at,
+    }
+}
+
+fn direct_message_view(
+    state: &NodeState,
+    message: DirectMessageRecord,
+) -> Result<DirectMessageView, String> {
+    let envelope = DirectEnvelope {
+        event_id: message.event_id.clone(),
+        kind: "direct_message".into(),
+        from_peer_id: message.from_peer_id.clone(),
+        from_public_key: message.from_public_key.clone(),
+        from_x25519_public_key: message.from_x25519_public_key.clone(),
+        to_peer_id: message.to_peer_id.clone(),
+        created_at: message.created_at,
+        nonce: message.nonce.clone(),
+        ciphertext: message.ciphertext.clone(),
+        signature: message.signature.clone(),
+    };
+    let body = decrypt_direct_body(state, &envelope)?;
+    let local_peer_id = ensure_keypair(state)?.public().to_peer_id().to_string();
+    let author = if message.from_peer_id == local_peer_id {
+        "Você".into()
+    } else {
+        state
+            .database
+            .get_contact(&message.from_peer_id)?
+            .map(|contact| contact.display_name)
+            .unwrap_or_else(|| message.from_peer_id.chars().take(12).collect())
+    };
+    Ok(DirectMessageView {
+        id: message.event_id,
+        conversation_id: message.conversation_id,
+        from_peer_id: message.from_peer_id.clone(),
+        to_peer_id: message.to_peer_id,
+        author,
+        content: body.content.unwrap_or_default(),
+        created_at: message.created_at,
+        mine: message.from_peer_id == local_peer_id,
+    })
+}
+
+fn enqueue_and_publish_direct(
+    _app: &AppHandle,
+    state: &NodeState,
+    envelope: DirectEnvelope,
+) -> Result<(), String> {
+    state.database.enqueue_outbox(
+        &envelope.event_id,
+        "direct",
+        &serde_json::to_string(&envelope)
+            .map_err(|error| format!("envelope direto inválido: {error}"))?,
+        envelope.created_at,
+    )?;
+    if let Some(sender) = state
+        .command_tx
+        .lock()
+        .map_err(|_| "controle do node indisponível")?
+        .clone()
+    {
+        sender
+            .send(NodeCommand::PublishDirect {
+                envelope: Box::new(envelope),
+            })
+            .map_err(|_| "node não está aceitando mensagens privadas".to_string())?;
+    }
+    Ok(())
+}
+
+fn process_direct_envelope(
+    app: &AppHandle,
+    state: &NodeState,
+    envelope: DirectEnvelope,
+) -> Result<(), String> {
+    let local_peer_id = ensure_keypair(state)?.public().to_peer_id().to_string();
+    if envelope.to_peer_id != local_peer_id {
+        return Ok(());
+    }
+    verify_author(
+        &envelope.from_public_key,
+        &envelope.from_peer_id,
+        &direct_signing_bytes(&envelope)?,
+        &envelope.signature,
+    )?;
+    let body = decrypt_direct_body(state, &envelope)?;
+    let now = now_millis();
+    match envelope.kind.as_str() {
+        "friend_request" | "friend_accept" | "friend_reject" | "friend_block" => {
+            let card = body.contact_card.ok_or("cartão de contato ausente")?;
+            validate_contact_card(&card)?;
+            if card.peer_id != envelope.from_peer_id {
+                return Err("cartão de contato não corresponde ao remetente".into());
+            }
+            for address in &card.addresses {
+                if let Ok(address) = address.parse::<Multiaddr>() {
+                    state.database.remember_peer_address(
+                        &card.peer_id,
+                        &address.to_string(),
+                        "contact",
+                        now,
+                    )?;
+                }
+            }
+            let existing = state.database.get_contact(&card.peer_id)?;
+            if existing
+                .as_ref()
+                .is_some_and(|contact| contact.status == "blocked")
+                && envelope.kind != "friend_block"
+            {
+                return Ok(());
+            }
+            let status = match envelope.kind.as_str() {
+                "friend_request" => {
+                    if existing
+                        .as_ref()
+                        .is_some_and(|contact| contact.status == "accepted")
+                    {
+                        "accepted"
+                    } else {
+                        "pending"
+                    }
+                }
+                "friend_accept" => "accepted",
+                "friend_reject" => "rejected",
+                _ => "blocked",
+            };
+            state.database.upsert_contact(&ContactRecord {
+                peer_id: card.peer_id.clone(),
+                display_name: card.display_name.clone(),
+                public_key: card.public_key.clone(),
+                x25519_public_key: card.x25519_public_key.clone(),
+                status: status.into(),
+                requested_by: if envelope.kind == "friend_request" {
+                    "remote"
+                } else {
+                    existing
+                        .as_ref()
+                        .map(|contact| contact.requested_by.as_str())
+                        .unwrap_or("remote")
+                }
+                .into(),
+                created_at: existing
+                    .as_ref()
+                    .map(|contact| contact.created_at)
+                    .unwrap_or(now),
+                updated_at: now,
+                last_seen: now,
+            })?;
+            if envelope.kind == "friend_request" {
+                for address in &card.addresses {
+                    if let Ok(address) = address.parse::<Multiaddr>() {
+                        if let Ok(peer_id) = card.peer_id.parse::<PeerId>() {
+                            if let Ok(sender) = state.command_tx.lock() {
+                                if let Some(sender) = sender.clone() {
+                                    let _ = sender.send(NodeCommand::Dial {
+                                        address: peer_dial_address(address, &peer_id),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(contact) = state.database.get_contact(&card.peer_id)? {
+                let _ = app.emit(
+                    EVENT_NAME,
+                    NodeEvent {
+                        kind: "friend-updated".into(),
+                        message: None,
+                        snapshot: None,
+                        error: None,
+                        data: Some(
+                            serde_json::to_value(friend_view(state, contact))
+                                .map_err(|error| error.to_string())?,
+                        ),
+                    },
+                );
+            }
+        }
+        "direct_message" => {
+            let contact = state
+                .database
+                .get_contact(&envelope.from_peer_id)?
+                .ok_or("remetente não é conhecido")?;
+            if contact.status != "accepted" {
+                return Err("mensagem privada recebida de contato não aceito".into());
+            }
+            let record = direct_record(&envelope);
+            if state.database.insert_direct_message(&record)? {
+                let view = direct_message_view(state, record)?;
+                let _ = app.emit(
+                    EVENT_NAME,
+                    NodeEvent {
+                        kind: "direct-message".into(),
+                        message: None,
+                        snapshot: None,
+                        error: None,
+                        data: Some(serde_json::to_value(view).map_err(|error| error.to_string())?),
+                    },
+                );
+            }
+        }
+        _ => return Err("tipo de mensagem direta desconhecido".into()),
+    }
+    Ok(())
 }
 
 fn announced_address(address: Multiaddr, peer_id: &PeerId) -> Option<Multiaddr> {
@@ -3649,6 +4359,26 @@ fn flush_outbox(
                             emit_sync_waiting(app);
                         }
                     }
+                }
+            }
+            "direct" => {
+                let envelope: DirectEnvelope = serde_json::from_str(&record.payload)
+                    .map_err(|error| format!("envelope direto pendente inválido: {error}"))?;
+                let Ok(peer_id) = envelope.to_peer_id.parse::<PeerId>() else {
+                    state
+                        .database
+                        .mark_outbox_attempt(&record.event_id, now_millis())?;
+                    continue;
+                };
+                if swarm
+                    .connected_peers()
+                    .any(|connected| connected == &peer_id)
+                {
+                    swarm
+                        .behaviour_mut()
+                        .direct
+                        .send_request(&peer_id, envelope);
+                    state.database.remove_outbox(&record.event_id)?;
                 }
             }
             _ => {}
@@ -5248,6 +5978,12 @@ pub fn run() {
             connect_peer,
             get_network_status,
             get_known_peers,
+            get_contact_card,
+            list_friends,
+            create_friend_request,
+            respond_friend_request,
+            get_direct_messages,
+            send_direct_message,
             test_peer_connection,
             open_external_url
         ])
@@ -5264,6 +6000,7 @@ mod tests {
         gossipsub: gossipsub::Behaviour,
         sync: request_response::json::Behaviour<SyncRequest, SyncResponse>,
         call_signal: request_response::json::Behaviour<CallSignal, CallSignal>,
+        direct: request_response::json::Behaviour<DirectEnvelope, DirectEnvelope>,
     }
 
     fn integration_swarm(keypair: Keypair) -> Swarm<IntegrationBehaviour> {
@@ -5289,6 +6026,11 @@ mod tests {
             request_response::Config::default()
                 .with_request_timeout(std::time::Duration::from_secs(5)),
         );
+        let direct = request_response::json::Behaviour::new(
+            [(StreamProtocol::new(DIRECT_PROTOCOL), ProtocolSupport::Full)],
+            request_response::Config::default()
+                .with_request_timeout(std::time::Duration::from_secs(5)),
+        );
         SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -5301,6 +6043,7 @@ mod tests {
                 gossipsub,
                 sync,
                 call_signal,
+                direct,
             })
             .expect("test behaviour")
             .build()
@@ -5318,11 +6061,13 @@ mod tests {
                 .gossipsub
                 .subscribe(&topic)
                 .expect("owner subscribe");
-            member
-                .behaviour_mut()
-                .gossipsub
-                .subscribe(&topic)
-                .expect("member subscribe");
+            assert!(matches!(
+                owner
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic.clone(), b"early-publish".to_vec()),
+                Err(gossipsub::PublishError::NoPeersSubscribedToTopic)
+            ));
             owner
                 .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("listen address"))
                 .expect("owner listen");
@@ -5363,6 +6108,11 @@ mod tests {
                             match event {
                                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                                     member.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                                    member
+                                        .behaviour_mut()
+                                        .gossipsub
+                                        .subscribe(&topic)
+                                        .expect("member subscribe after connection");
                                     member.behaviour_mut().sync.send_request(&peer_id, SyncRequest {
                                         group_id: "transport-test".into(),
                                         channel_id: None,
@@ -6519,5 +7269,62 @@ mod tests {
             signature: Vec::new(),
         };
         assert!(apply_control_event(&state, &invalid).is_err());
+    }
+
+    #[test]
+    fn two_nodes_exchange_direct_contact_envelope_over_local_transport() {
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        runtime.block_on(async {
+            let owner_key = Keypair::generate_ed25519();
+            let member_key = Keypair::generate_ed25519();
+            let owner_id = owner_key.public().to_peer_id();
+            let member_id = member_key.public().to_peer_id();
+            let mut owner = integration_swarm(owner_key);
+            let mut member = integration_swarm(member_key);
+            owner
+                .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("owner listen"))
+                .expect("owner listen");
+            let owner_address = loop {
+                if let SwarmEvent::NewListenAddr { address, .. } = owner.select_next_some().await {
+                    break address;
+                }
+            };
+            member
+                .dial(owner_address.with(Protocol::P2p(owner_id)))
+                .expect("dial owner");
+            let mut received = false;
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    tokio::select! {
+                        event = owner.select_next_some() => {
+                            if let SwarmEvent::ConnectionEstablished { peer_id, .. } = event {
+                                let envelope = DirectEnvelope {
+                                    event_id: "direct-test".into(),
+                                    kind: "friend_request".into(),
+                                    from_peer_id: owner_id.to_string(),
+                                    from_public_key: vec![1],
+                                    from_x25519_public_key: vec![2; 32],
+                                    to_peer_id: member_id.to_string(),
+                                    created_at: 1,
+                                    nonce: vec![3; 24],
+                                    ciphertext: vec![4],
+                                    signature: vec![5],
+                                };
+                                owner.behaviour_mut().direct.send_request(&peer_id, envelope);
+                            }
+                        }
+                        event = member.select_next_some() => {
+                            if let SwarmEvent::Behaviour(IntegrationBehaviourEvent::Direct(request_response::Event::Message { message: request_response::Message::Request { request, channel, .. }, .. })) = event {
+                                assert_eq!(request.to_peer_id, member_id.to_string());
+                                member.behaviour_mut().direct.send_response(channel, request).expect("member response");
+                                received = true;
+                            }
+                        }
+                    }
+                    if received { break; }
+                }
+            }).await.expect("direct transport timeout");
+            assert!(received);
+        });
     }
 }
